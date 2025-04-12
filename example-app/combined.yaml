@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example-app
+  namespace: default
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: example-app
+  template:
+    metadata:
+      labels:
+        app: example-app
+    spec:
+      containers:
+      - name: example-app
+        image: hashicorp/http-echo
+        args:
+        - "-text=hello from example-app"
+        ports:
+        - containerPort: 5678
+        resources:
+          requests:
+            cpu: "10m"
+            memory: "16Mi"
+          limits:
+            cpu: "50m"
+            memory: "64Mi"
+
+---
+# Service to expose example-app pods internally
+apiVersion: v1
+kind: Service
+metadata:
+  name: example-app
+  namespace: default
+spec:
+  selector:
+    app: example-app
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 5678
+
+---
+# Ingress to expose example-app externally using pico-tunnel IngressClass
+# Routes requests to tuns.guerri.me to example-app Service
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: example-app
+  namespace: default
+spec:
+  ingressClassName: pico-tunnel
+  rules:
+  - host: demo
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: example-app
+            port:
+              number: 80

@@ -1,0 +1,98 @@
+# Namespace for the pico-ingress-controller resources
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pico-system
+
+---
+# SSH key for pico.sh
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pico-ssh-key
+  namespace: pico-system
+type: Opaque
+data:
+  id: <base64-encoded-content-of-your-pico.sh-ssh-key>
+
+---
+# ServiceAccount for the pico-ingress-controller to interact with the Kubernetes API
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pico-ingress-controller
+  namespace: pico-system
+
+---
+# ClusterRole with permissions to manage Ingress resources across all namespaces
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pico-ingress-controller
+rules:
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+
+---
+# Binding the ClusterRole to the pico-ingress-controller ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pico-ingress-controller
+subjects:
+  - kind: ServiceAccount
+    name: pico-ingress-controller
+    namespace: pico-system
+roleRef:
+  kind: ClusterRole
+  name: pico-ingress-controller
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# IngressClass definition for Ingress resources managed by the pico-ingress-controller
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: pico-tunnel
+spec:
+  controller: tunnels.pico.sh/ingress-controller
+
+---
+# Deployment of the pico-ingress-controller
+# Runs the controller with autossh and kubectl to manage Pico.sh tunnels
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pico-ingress-controller
+  namespace: pico-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pico-ingress-controller
+  template:
+    metadata:
+      labels:
+        app: pico-ingress-controller
+    spec:
+      serviceAccountName: pico-ingress-controller
+      containers:
+        - name: controller
+          image: <pico-ingress-controller docker image>
+          volumeMounts:
+            - name: ssh-key
+              mountPath: /ssh
+              readOnly: true
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+      volumes:
+        - name: ssh-key
+          secret:
+            secretName: pico-ssh-key
+            defaultMode: 256 # 0400 octal
