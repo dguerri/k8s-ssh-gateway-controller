@@ -27,7 +27,6 @@ while true; do
   # Ensure autossh tunnels are running for all active Ingress hosts
   for host in "${active_hosts[@]}"; do
     ingress=$(echo "$ingresses" | jq -c '.items[] | select(.spec.rules[0].host=="'"$host"'")')
-
     name=$(echo "$ingress" | jq -r '.metadata.name')
     service=$(echo "$ingress" | jq -r '.spec.rules[0].http.paths[0].backend.service.name')
     port=$(echo "$ingress" | jq -r '.spec.rules[0].http.paths[0].backend.service.port.number')
@@ -51,7 +50,11 @@ while true; do
   (pgrep -af "autossh.*$SSH_USER@$SSH_HOST" || true) | while read -r pid cmd; do
     found=0
     for host in "${active_hosts[@]}"; do
-      if echo "$cmd" | grep -q "$host"; then
+      ingress=$(echo "$ingresses" | jq -c '.items[] | select(.spec.rules[0].host=="'"$host"'")')
+      service=$(echo "$ingress" | jq -r '.spec.rules[0].http.paths[0].backend.service.name')
+      port=$(echo "$ingress" | jq -r '.spec.rules[0].http.paths[0].backend.service.port.number')
+      namespace=$(echo "$ingress" | jq -r '.metadata.namespace')
+      if echo "$cmd" | grep -q "$host:80:$service.$namespace.svc.cluster.local:$port"; then
         found=1
         break
       fi
@@ -64,5 +67,5 @@ while true; do
   done
 
   # Sleep before next reconciliation loop
-  sleep 10
+  sleep 15
 done
