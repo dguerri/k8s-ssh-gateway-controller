@@ -101,6 +101,26 @@ Controller:
 kubectl delete -f k8s/combined.yaml
 ```
 
+## How does it work?
+
+TBW.
+
+```
+Client Browser
+    |
+    V
+pippo-demo.nue.tuns.sh (DNS to Pico.sh Edge)
+    |
+    V
+SSH Reverse Tunnel (autossh running in your ingress controller Pod)
+    |
+    V
+example-app.default.svc.cluster.local:80 (ClusterIP Service)
+    |
+    V
+Pods selected by label app=example-app
+```
+
 ## Future improvements
 
 - Replace the controller bash script with a go application
