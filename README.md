@@ -15,18 +15,18 @@ The controller is not available on any upstream docker registry. You need to bui
 For instance:
 
 ```sh
-cd controller
-docker build . -t pico-ingress-controller:v1.0
-docker tag pico-ingress-controller:v1.0 my-docker-registry.home.me:5001/pico-ingress-controller:v1.0
-docker push my-docker-registry.home.me:5001/pico-ingress-controller:v1.0
+cd ingress-controller
+docker build . -t pico-sh-ingress-controller:v1.0
+docker tag pico-sh-ingress-controller:v1.0 my-docker-registry.home.me:5001/pico-sh-ingress-controller:v1.0
+docker push my-docker-registry.home.me:5001/pico-sh-ingress-controller:v1.0
 ```
 
 ### Provide missing details in the Kubernetes specification
 
-Edit `k8s/combined.yaml` and provide:
+Edit `ingress-controller/k8s/combined.yaml` and provide:
 
-- The name of the Docker image containing the controller (built above) (i.e., `<pico-ingress-controller docker image>`)
-- The pico.sh ssh key (i.e., `<base64-encoded-content-of-your-pico.sh-ssh-key>`)
+- The name of the Docker image containing the controller (built above) (i.e., `<pico-sh-ingress-controller docker image>`)
+- The pico.sh ssh key (i.e., `<base64-encoded-content-of-your-pico-sh-ssh-key>`)
 
 For instance, use this to encode your `id_rsa` key.
 
@@ -41,7 +41,7 @@ WARNING: your key cannot be protected by password.
 The following must be run as an administrator:
 
 ```sh
-kubectl apply -f k8s/combined.yaml
+kubectl apply -f ingress-controller/k8s/combined.yaml
 ```
 
 Verify that everything is working:
@@ -49,7 +49,7 @@ Verify that everything is working:
 ```sh
 ❯ kubectl get pods -o wide -n pico-system
 NAME                                       READY   STATUS    RESTARTS   AGE   IP             NODE     NOMINATED NODE   READINESS GATES
-pico-ingress-controller-7cc6f8b5dd-9cr6h   1/1     Running   0          16m   10.50.228.71   k8s-w1   <none>           <none>
+pico-sh-ingress-controller-7cc6f8b5dd-9cr6h   1/1     Running   0          16m   10.50.228.71   k8s-w1   <none>           <none>
 ```
 
 ### Run a demo application

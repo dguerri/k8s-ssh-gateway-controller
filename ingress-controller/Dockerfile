@@ -1,8 +1,8 @@
 FROM alpine:3
-LABEL name=pico-ingress.controller.sh
-LABEL version=1.6
+LABEL name=pico-sh-ingress-controller.sh
+LABEL version=1.8
 
-RUN apk add --no-cache bash autossh openssh jq kubectl curl
+RUN apk add --no-cache bash autossh jq kubectl
 
 WORKDIR /
 

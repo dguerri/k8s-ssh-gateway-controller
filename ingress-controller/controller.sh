@@ -9,10 +9,13 @@
 set -euo pipefail
 
 # Configuration: customizable through environment variables
-INGRESS_CLASS=${INGRESS_CLASS:-pico-tunnel}
+INGRESS_CLASS=${INGRESS_CLASS:-pico-sh-tunnel}
 SSH_USER=${SSH_USER:-tunnel}
 SSH_HOST=${SSH_HOST:-tuns.sh}
 SSH_KEY_PATH=${SSH_KEY_PATH:-/ssh/id}
+SLEEP_TIME=${SLEEP_TIME:-15}
+
+echo "Starting Pico.sh Ingress controller"
 
 # Main loop: runs indefinitely to manage tunnels based on Ingress resources
 while true; do
@@ -22,7 +25,9 @@ while true; do
   mapfile -t active_hosts < <(echo "$ingresses" | jq -r \
     '.items[] | select(.spec.ingressClassName=="'"$INGRESS_CLASS"'") | .spec.rules[0].host')
 
-  echo "Active hosts: ${active_hosts[*]}"
+  if [ "${#active_hosts[@]}" -gt 0 ]; then
+    echo "Active host(s): ${active_hosts[*]}"
+  fi
 
   # Ensure autossh tunnels are running for all active Ingress hosts
   for host in "${active_hosts[@]}"; do
@@ -67,5 +72,5 @@ while true; do
   done
 
   # Sleep before next reconciliation loop
-  sleep 15
+  sleep "${SLEEP_TIME}"
 done

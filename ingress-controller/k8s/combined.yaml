@@ -1,85 +1,85 @@
-# Namespace for the pico-ingress-controller resources
+# Namespace for the pico-sh-ingress-controller resources
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: pico-system
+  name: pico-sh-system
 
 ---
 # SSH key for pico.sh
 apiVersion: v1
 kind: Secret
 metadata:
-  name: pico-ssh-key
-  namespace: pico-system
+  name: pico-sh-ssh-key
+  namespace: pico-sh-system
 type: Opaque
 data:
   id: <base64-encoded-content-of-your-pico.sh-ssh-key>
 
 ---
-# ServiceAccount for the pico-ingress-controller to interact with the Kubernetes API
+# ServiceAccount for the pico-sh-ingress-controller to interact with the Kubernetes API
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: pico-ingress-controller
-  namespace: pico-system
+  name: pico-sh-ingress-controller
+  namespace: pico-sh-system
 
 ---
 # ClusterRole with permissions to manage Ingress resources across all namespaces
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: pico-ingress-controller
+  name: pico-sh-ingress-controller
 rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]
     verbs: ["get", "list", "watch"]
 
 ---
-# Binding the ClusterRole to the pico-ingress-controller ServiceAccount
+# Binding the ClusterRole to the pico-sh-ingress-controller ServiceAccount
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: pico-ingress-controller
+  name: pico-sh-ingress-controller
 subjects:
   - kind: ServiceAccount
-    name: pico-ingress-controller
-    namespace: pico-system
+    name: pico-sh-ingress-controller
+    namespace: pico-sh-system
 roleRef:
   kind: ClusterRole
-  name: pico-ingress-controller
+  name: pico-sh-ingress-controller
   apiGroup: rbac.authorization.k8s.io
 
 ---
-# IngressClass definition for Ingress resources managed by the pico-ingress-controller
+# IngressClass definition for Ingress resources managed by the pico-sh-ingress-controller
 apiVersion: networking.k8s.io/v1
 kind: IngressClass
 metadata:
-  name: pico-tunnel
+  name: pico-sh-tunnel
 spec:
   controller: tunnels.pico.sh/ingress-controller
 
 ---
-# Deployment of the pico-ingress-controller
+# Deployment of the pico-sh-ingress-controller
 # Runs the controller with autossh and kubectl to manage Pico.sh tunnels
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: pico-ingress-controller
-  namespace: pico-system
+  name: pico-sh-ingress-controller
+  namespace: pico-sh-system
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: pico-ingress-controller
+      app: pico-sh-ingress-controller
   template:
     metadata:
       labels:
-        app: pico-ingress-controller
+        app: pico-sh-ingress-controller
     spec:
-      serviceAccountName: pico-ingress-controller
+      serviceAccountName: pico-sh-ingress-controller
       containers:
         - name: controller
-          image: <pico-ingress-controller docker image>
+          image: <pico-sh-ingress-controller docker image>
           volumeMounts:
             - name: ssh-key
               mountPath: /ssh
@@ -94,5 +94,5 @@ spec:
       volumes:
         - name: ssh-key
           secret:
-            secretName: pico-ssh-key
+            secretName: pico-sh-ssh-key
             defaultMode: 256 # 0400 octal

@@ -49,7 +49,7 @@ kind: Ingress
 metadata:
   name: example-app
 spec:
-  ingressClassName: pico-tunnel
+  ingressClassName: pico-sh-tunnel
   rules:
   - host: demo
     http:
