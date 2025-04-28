@@ -1,17 +1,125 @@
 package controllers
 
 import (
-	"errors"
+	"context"
+	"fmt"
+	"os"
+	"strconv"
 	"time"
+
+	sshmgr "github.com/dguerri/pico-sh-gateway-api-controller/ssh"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
-const requeueBackoff = 3 * time.Second
+// Defaults for SSH connection, can be overridden by environment variables
+const defaultKeyPath = "/ssh/id"
+const defaultSSHServer = "tuns.sh:22"
+const defaultSSHUsername = "pico-tunnel"
+const defaultBackoffInterval = 5 * time.Second
+const defaultKeepAliveInterval = 10 * time.Second
+const defaultConnectTimeout = 5 * time.Second
 
-// ErrNoGateway is returned when no Gateway is found for a Listener.
-var ErrNoGateway = errors.New("no Gateway found for Listener")
+var keyPath = getEnvOrDefault("SSH_PRIVATE_KEY_PATH", defaultKeyPath)
+var backoffInterval = getEnvOrDefault("BACKOFF_INTERVAL", defaultBackoffInterval)
+var keepAliveInterval = getEnvOrDefault("KEEP_ALIVE_INTERVAL", defaultKeepAliveInterval)
+var connectTimeout = getEnvOrDefault("CONNECT_TIMEOUT", defaultConnectTimeout)
+var sshServer = getEnvOrDefault("SSH_SERVER", defaultSSHServer)
+var sshUsername = getEnvOrDefault("SSH_USERNAME", defaultSSHUsername)
 
-// ErrNoListener is returned when no Listener is found for a Gateway.
-var ErrNoListener = errors.New("no Listener found for Gateway")
+// routeDetails holds the extracted details of a route.
+type routeDetails struct {
+	routeName      string
+	routeNamespace string
+	gwName         string
+	gwNamespace    string
+	listenerName   string
+	backendHost    string
+	backendPort    int
+}
 
-// ErrInvalidPort is returned when an invalid port is used.
-var ErrInvalidPortForHTTPListener = errors.New("invalid port for HTTP listener")
+// containsString checks if a slice contains a string
+func containsString(slice []string, s string) bool {
+	for _, item := range slice {
+		if item == s {
+			return true
+		}
+	}
+	return false
+}
+
+// removeString removes a string from a slice
+func removeString(slice []string, s string) []string {
+	result := make([]string, 0, len(slice))
+	for _, item := range slice {
+		if item != s {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+// loadPrivateKey loads an SSH private key from file
+func loadPrivateKey(keyPath string) (key []byte, err error) {
+	key, err = os.ReadFile(keyPath)
+
+	return
+}
+
+func getEnvOrDefault[T any](key string, defaultValue T) T {
+	value, exists := os.LookupEnv(key)
+	if !exists {
+		return defaultValue
+	}
+	var parsedValue T
+	switch any(defaultValue).(type) {
+	case int:
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return defaultValue
+		}
+		parsedValue = any(parsed).(T)
+	case string:
+		parsedValue = any(value).(T)
+	default:
+		return defaultValue
+	}
+	return parsedValue
+}
+
+func getGwKey(gwNamespace, gwName string) string {
+	return fmt.Sprintf("%s/%s", gwNamespace, gwName)
+}
+
+func createListener(k8sListener gatewayv1.Listener) *Listener {
+	remoteHostname := "0.0.0.0"
+	if k8sListener.Hostname != nil {
+		remoteHostname = string(*k8sListener.Hostname)
+	}
+	return &Listener{
+		Hostname: remoteHostname,
+		Protocol: string(k8sListener.Protocol),
+		Port:     int(k8sListener.Port),
+	}
+}
+
+func createSSHManager(ctx context.Context) (*sshmgr.SSHTunnelManager, error) {
+	key, err := loadPrivateKey(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("could not load private key: %w", err)
+	}
+
+	sshConfig := sshmgr.SSHConnectionConfig{
+		ServerAddress:     sshServer,
+		Username:          sshUsername,
+		PrivateKey:        key,
+		ConnectTimeout:    connectTimeout,
+		KeepAliveInterval: keepAliveInterval,
+		BackoffInterval:   backoffInterval,
+	}
+
+	return sshmgr.NewSSHTunnelManager(ctx, sshConfig)
+}
+
+func getSvcHostname(svcName, svcNamespace string) string {
+	return fmt.Sprintf("%s.%s.svc.cluster.local", svcName, svcNamespace)
+}
