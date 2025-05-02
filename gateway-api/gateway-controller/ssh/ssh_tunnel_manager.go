@@ -18,6 +18,7 @@ import (
 type sshClient interface {
 	Listen(network, addr string) (net.Listener, error)
 	SendRequest(string, bool, []byte) (bool, []byte, error)
+	HandleChannelOpen(string) <-chan ssh.NewChannel
 	Close() error
 }
 
@@ -31,25 +32,6 @@ var netDial = func(network string, address string) (net.Conn, error) {
 	return net.Dial(network, address)
 }
 
-// SSHTunnelManager manages SSH tunnels and forwardings.
-type SSHTunnelManager struct {
-	sshServerAddress  string
-	sshUser           string
-	hostKey           string
-	signer            ssh.Signer
-	timeout           time.Duration
-	keepAliveInterval time.Duration
-	backoffInterval   time.Duration
-
-	ctx           context.Context
-	cancel        context.CancelFunc
-	connected     bool
-	clientMu      sync.RWMutex
-	client        sshClient
-	forwardingsMu sync.Mutex
-	forwardings   map[string]*forwardingSession
-}
-
 // SSHConnectionConfig contains configuration for SSH connection.
 type SSHConnectionConfig struct {
 	PrivateKey        []byte
@@ -61,15 +43,46 @@ type SSHConnectionConfig struct {
 	BackoffInterval   time.Duration
 }
 
+// ForwardingConfig defines configuration for a single forwarding.
+type ForwardingConfig struct {
+	RemoteHost   string
+	RemotePort   int
+	InternalHost string
+	InternalPort int
+}
+
+// SSHTunnelManager manages SSH tunnels and forwardings.
+type SSHTunnelManager struct {
+	sshServerAddress  string
+	sshUser           string
+	hostKey           string
+	signer            ssh.Signer
+	timeout           time.Duration
+	keepAliveInterval time.Duration
+	backoffInterval   time.Duration
+	externalCtx       context.Context
+	connectionCtx     context.Context
+	connectionCancel  context.CancelFunc
+	connected         bool
+	clientMu          sync.RWMutex
+	client            sshClient
+	forwardingsMu     sync.Mutex
+	forwardings       map[string]*ForwardingConfig
+}
+
+// forwardingKey generates a unique key for the forwarding session based on remote host and port.
+func forwardingKey(remoteHost string, remotePort int) string {
+	return fmt.Sprintf("%s:%d", remoteHost, remotePort)
+}
+
 // NewSSHTunnelManager creates a new SSHTunnelManager with the specified configuration.
-func NewSSHTunnelManager(ctx context.Context, config SSHConnectionConfig) (*SSHTunnelManager, error) {
+// externalCtx is used to cancel the connection and forwardings when the context is done.
+func NewSSHTunnelManager(externalCtx context.Context, config *SSHConnectionConfig) (*SSHTunnelManager, error) {
 	signer, err := ssh.ParsePrivateKey(config.PrivateKey)
 	if err != nil {
 		slog.With("function", "NewSSHTunnelManager").Error("unable to parse private key", "error", err)
 		return nil, fmt.Errorf("unable to parse private key: %w", err)
 	}
-
-	ctx, cancel := context.WithCancel(ctx)
 
 	m := &SSHTunnelManager{
 		sshServerAddress:  config.ServerAddress,
@@ -79,23 +92,24 @@ func NewSSHTunnelManager(ctx context.Context, config SSHConnectionConfig) (*SSHT
 		timeout:           config.ConnectTimeout,
 		keepAliveInterval: config.KeepAliveInterval,
 		backoffInterval:   config.BackoffInterval,
-		ctx:               ctx,
-		cancel:            cancel,
+		externalCtx:       externalCtx,
 		connected:         false,
-		forwardings:       make(map[string]*forwardingSession),
+		forwardings:       make(map[string]*ForwardingConfig),
 	}
-	go m.connectionManager()
+	go m.handleConnection()
 
 	return m, nil
 }
 
 // WaitConnection blocks until the ssh connection is established
-func (m *SSHTunnelManager) WaitConnection() {
+func (m *SSHTunnelManager) WaitConnection() error {
 	for {
 		select {
-		case <-m.ctx.Done():
+		case <-m.externalCtx.Done():
+			m.clientMu.Lock()
+			defer m.clientMu.Unlock()
 			m.closeClient()
-			return
+			return fmt.Errorf("ssh connection cancelled: %w", m.externalCtx.Err())
 		default:
 		}
 		if m.connected {
@@ -103,45 +117,53 @@ func (m *SSHTunnelManager) WaitConnection() {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+
+	return nil
 }
 
-// connectionManager manages the SSH connection lifecycle and reconnections.
-func (m *SSHTunnelManager) connectionManager() {
+// handleConnection manages the SSH connection lifecycle and reconnections. Blocks until externalCtx is done.
+func (m *SSHTunnelManager) handleConnection() {
 	for {
+		m.clientMu.Lock()
+		err := m.connectClient()
+		m.clientMu.Unlock()
+		if err != nil {
+			slog.With("function", "handleConnection").Error("ssh connection failed", "error", err)
+			time.Sleep(m.backoffInterval)
+			continue
+		}
+		slog.With("function", "handleConnection").Info("ssh connection established")
+
 		select {
-		case <-m.ctx.Done():
+		case <-m.externalCtx.Done():
+			m.clientMu.Lock()
+			defer m.clientMu.Unlock()
 			m.closeClient()
 			return
 		default:
 		}
 
-		client, err := m.connect()
-		if err != nil {
-			slog.With("function", "connectionManager").Error("ssh connection failed", "error", err)
-			time.Sleep(m.backoffInterval)
-			continue
-		}
-
-		slog.With("function", "connectionManager").Info("ssh connection established")
-
-		m.clientMu.Lock()
-		m.client = client
-		m.connected = true
-		m.clientMu.Unlock()
-
 		m.forwardingsMu.Lock()
 		// Restart existing forwardings, in case of reconnection
-		for _, session := range m.forwardings {
-			go m.handleForwarding(session)
+		for key, forwardingSession := range m.forwardings {
+			slog.With("function", "handleConnection").Info("restarting forwarding", "key", forwardingSession)
+			err := m.sendForwardingRequest(forwardingSession)
+			if err != nil {
+				slog.With("function", "handleConnection").Error("failed to send forwarding request, removing forwarding", "error", err)
+				delete(m.forwardings, key)
+				continue
+			}
 		}
 		m.forwardingsMu.Unlock()
 
+		// Handle incoming channels
+		go m.handleChannels()
+
 		// Monitor connection (keepalive and disconnect detection)
-		m.monitorConnection(client)
+		m.monitorConnection()
 
 		m.clientMu.Lock()
 		m.closeClient()
-		m.connected = false
 		m.clientMu.Unlock()
 
 		time.Sleep(m.backoffInterval)
@@ -149,59 +171,63 @@ func (m *SSHTunnelManager) connectionManager() {
 }
 
 // monitorConnection monitors the SSH connection and sends keepalive requests.
-func (m *SSHTunnelManager) monitorConnection(client sshClient) {
+func (m *SSHTunnelManager) monitorConnection() {
 	ticker := time.NewTicker(m.keepAliveInterval)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-m.ctx.Done():
+		case <-m.externalCtx.Done():
 			return
 		case <-ticker.C:
-			if _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+			if m.connectionCtx.Err() != nil {
+				slog.With("function", "monitorConnection").Warn("ssh connection context cancelled")
+				return
+			}
+			if _, _, err := m.client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
 				slog.With("function", "monitorConnection").Warn("ssh keepalive failed, reconnecting", "error", err)
 				return
 			}
+			slog.With("function", "monitorConnection").Info("ssh keepalive sent")
 		}
 	}
 }
 
 // closeClient closes the current SSH client connection.
 func (m *SSHTunnelManager) closeClient() {
-	m.clientMu.Lock()
-	defer m.clientMu.Unlock()
+	m.connected = false
+
+	if m.connectionCancel != nil {
+		m.connectionCancel()
+	}
 	if m.client != nil {
 		m.client.Close()
-		m.client = nil
 	}
+	m.client = nil
+	m.connectionCancel = nil
 }
 
-// ForwardingConfig defines configuration for a single forwarding.
-type ForwardingConfig struct {
-	RemoteHost   string
-	RemotePort   int
-	InternalHost string
-	InternalPort int
+type channelForwardMsg struct {
+	addr  string
+	rport uint32
 }
 
-type forwardingSession struct {
-	remoteHost   string
-	remotePort   int
-	internalHost string
-	internalPort int
-
-	ctx    context.Context
-	cancel context.CancelFunc
+type forwardedTCPPayload struct {
+	Addr       string
+	Port       uint32
+	OriginAddr string
+	OriginPort uint32
 }
 
 // StartForwarding starts a new forwarding based on the provided configuration.
-func (m *SSHTunnelManager) StartForwarding(fwd *ForwardingConfig) error {
+func (m *SSHTunnelManager) StartForwarding(fwd ForwardingConfig) error {
+	m.forwardingsMu.Lock()
+	defer m.forwardingsMu.Unlock()
+
 	if !m.connected {
 		slog.With("function", "StartForwarding").Warn("client not ready")
 		return &ErrSSHClientNotReady{}
 	}
-	key := forwardingKey(fwd)
-	m.forwardingsMu.Lock()
-	defer m.forwardingsMu.Unlock()
+	key := forwardingKey(fwd.RemoteHost, fwd.RemotePort)
 
 	if _, exists := m.forwardings[key]; exists {
 		err := &ErrSSHForwardingExists{Key: key}
@@ -209,120 +235,181 @@ func (m *SSHTunnelManager) StartForwarding(fwd *ForwardingConfig) error {
 		return err
 	}
 
-	ctx, cancel := context.WithCancel(m.ctx)
-	session := &forwardingSession{
-		remoteHost:   fwd.RemoteHost,
-		remotePort:   fwd.RemotePort,
-		internalHost: fwd.InternalHost,
-		internalPort: fwd.InternalPort,
-
-		ctx:    ctx,
-		cancel: cancel,
+	err := m.sendForwardingRequest(&fwd)
+	if err != nil {
+		slog.With("function", "StartForwarding").Error("failed to send forwarding request", "error", err)
+		return err
 	}
-	m.forwardings[key] = session
 
-	go m.handleForwarding(session)
+	// Store the forwarding session
+	m.forwardings[key] = &fwd
 
 	return nil
 }
 
-// StopForwarding stops an existing forwarding based on the provided configuration.
-func (m *SSHTunnelManager) StopForwarding(fwd *ForwardingConfig) (err error) {
-	if !m.connected {
-		return &ErrSSHClientNotReady{}
+// sendForwardingRequest sends a request to the SSH server to set up a TCP forwarding.
+// It returns an error if the request fails or is denied by the server.
+func (m *SSHTunnelManager) sendForwardingRequest(fwd *ForwardingConfig) error {
+	forwardMessage := channelForwardMsg{
+		addr:  fwd.RemoteHost,
+		rport: uint32(fwd.RemotePort),
 	}
-	key := forwardingKey(fwd)
+
+	ok, _, err := m.client.SendRequest("tcpip-forward", true, ssh.Marshal(&forwardMessage))
+	if err != nil {
+		slog.With("function", "sendForwardingRequest").Error("tcpip-forward request failed", "error", err)
+		return err
+	}
+	if !ok {
+		slog.With("function", "sendForwardingRequest").Error("tcpip-forward request denied by server")
+		return fmt.Errorf("ssh: tcpip-forward request denied by server")
+	}
+	slog.With("function", "sendForwardingRequest").Info("tcpip-forward request accepted", "key", forwardingKey(fwd.RemoteHost, fwd.RemotePort))
+	return nil
+}
+
+// StopForwarding stops an existing forwarding based on the provided configuration.
+func (m *SSHTunnelManager) StopForwarding(fwd *ForwardingConfig) error {
 	m.forwardingsMu.Lock()
 	defer m.forwardingsMu.Unlock()
 
-	session, exists := m.forwardings[key]
+	if !m.connected {
+		return &ErrSSHClientNotReady{}
+	}
+	key := forwardingKey(fwd.RemoteHost, fwd.RemotePort)
+	forwardingSession, exists := m.forwardings[key]
 	if !exists {
-		err = &ErrSSHForwardingNotFound{Key: key}
+		err := &ErrSSHForwardingNotFound{Key: key}
 		slog.With("function", "StopForwarding").Warn(err.Error())
-		return
+		return err
 	}
 
-	session.cancel()
+	// Cancel forwarding may still fail, but we should remove the forwardingSession anyway.
 	delete(m.forwardings, key)
+
+	err := m.sendForwardingCancel(forwardingSession)
+	if err != nil {
+		slog.With("function", "StopForwarding").Error("failed to send cancel request", "error", err)
+		return err
+	}
+
 	slog.With("function", "StopForwarding").Info("stopped forwarding", "key", key)
 
 	return nil
 }
 
-func forwardingKey(fwd *ForwardingConfig) string {
-	return fmt.Sprintf("%s:%d->%s:%d", fwd.RemoteHost, fwd.RemotePort, fwd.InternalHost, fwd.InternalPort)
+func (m *SSHTunnelManager) sendForwardingCancel(fwd *ForwardingConfig) error {
+	forwardMessage := channelForwardMsg{
+		addr:  fwd.RemoteHost,
+		rport: uint32(fwd.RemotePort),
+	}
+
+	ok, _, err := m.client.SendRequest("cancel-tcpip-forward", true, ssh.Marshal(&forwardMessage))
+	if err != nil {
+		slog.With("function", "StopForwarding").Error("cancel request failed", "error", err)
+		return err
+	}
+	if !ok {
+		slog.With("function", "StopForwarding").Error("request to cancel rejected by peer")
+		return fmt.Errorf("ssh: cancel-tcpip-forward request denied by peer")
+	}
+
+	return nil
 }
 
-// handleForwarding manages the lifecycle of a forwarding session.
-func (m *SSHTunnelManager) handleForwarding(fwdSession *forwardingSession) {
-	addr := fmt.Sprintf("%s:%d", fwdSession.remoteHost, fwdSession.remotePort)
-
+// handleForwarding manages the lifecycle of a forwarding sessions
+func (m *SSHTunnelManager) handleChannels() {
+	tcpipChan := m.client.HandleChannelOpen("forwarded-tcpip")
 	for {
+		slog.Info("waiting for new channels")
 		select {
-		case <-fwdSession.ctx.Done():
+		case <-m.connectionCtx.Done():
+			slog.With("function", "handleChannels").Warn("connection context cancelled, stopping channel handling")
 			return
-		default:
+		case ch := <-tcpipChan:
+			if ch == nil {
+				slog.With("function", "handleChannels").Warn("received nil channel, stopping channel handling")
+				return
+			}
+
+			logger := slog.With(
+				slog.String("channel_type", ch.ChannelType()),
+				slog.String("extra_data", string(ch.ExtraData())),
+			)
+			switch channelType := ch.ChannelType(); channelType {
+			case "forwarded-tcpip":
+				var payload forwardedTCPPayload
+				if err := ssh.Unmarshal(ch.ExtraData(), &payload); err != nil {
+					logger.Error("Unable to parse forwarded-tcpip payload", slog.Any("error", err))
+					ch.Reject(ssh.ConnectionFailed, "could not parse forwarded-tcpip payload: "+err.Error())
+					continue
+				}
+
+				logger.Info("forwarded-tcpip channel opened", "remote_addr", payload.Addr, "remote_port", payload.Port, "origin_addr", payload.OriginAddr, "origin_port", payload.OriginPort)
+
+				key := forwardingKey(payload.Addr, int(payload.Port))
+				m.forwardingsMu.Lock()
+				fwd, exists := m.forwardings[key]
+				m.forwardingsMu.Unlock()
+				if exists {
+					go func(ch ssh.NewChannel) {
+						remoteConn, reqs, acceptErr := ch.Accept()
+						if acceptErr != nil {
+							logger.Error("failed to accept channel", "error", acceptErr)
+							return
+						}
+						logger.Info("channel accepted")
+
+						// Avoid resource leak by discarding requests
+						go ssh.DiscardRequests(reqs)
+
+						go func() {
+							defer remoteConn.Close()
+
+							localConn, localErr := netDial("tcp", fwd.InternalHost+":"+fmt.Sprint(fwd.InternalPort))
+							if localErr != nil {
+								logger.Error("failed to connect to local address", "error", localErr)
+								return
+							}
+
+							defer localConn.Close()
+
+							wg := &sync.WaitGroup{}
+							wg.Add(2)
+
+							go func() {
+								defer wg.Done()
+								n, err := io.Copy(remoteConn, localConn)
+								slog.With("function", "HandleChannels").Info("copied data from local to remote", "bytes", n, "error", err)
+								remoteConn.CloseWrite()
+							}()
+
+							go func() {
+								defer wg.Done()
+								n, err := io.Copy(localConn, remoteConn)
+								slog.With("function", "HandleChannels").Info("copied data from remote to local", "bytes", n, "error", err)
+								if cw, ok := localConn.(interface{ CloseWrite() error }); ok {
+									cw.CloseWrite()
+								}
+							}()
+
+							wg.Wait()
+							slog.With("function", "HandleChannels").Info("channel closed")
+						}()
+					}(ch)
+					logger.Info("forwarding established", "key", key)
+				} else {
+					logger.Error("unable to find forwarding session")
+					ch.Reject(ssh.ConnectionFailed, "unable to find forwarding session")
+				}
+			}
 		}
-
-		m.clientMu.RLock()
-		client := m.client
-		m.clientMu.RUnlock()
-
-		if client == nil {
-			time.Sleep(m.backoffInterval)
-			continue
-		}
-
-		listener, err := client.Listen("tcp", addr)
-		if err != nil {
-			slog.With("function", "handleForwarding").Warn("listener setup failed, retrying", "address", addr, "error", err)
-			time.Sleep(m.backoffInterval)
-			continue
-		}
-
-		slog.With("function", "handleForwarding").Info("forwarding started", "remote", addr, "internal", fmt.Sprintf("%s:%d", fwdSession.internalHost, fwdSession.internalPort))
-
-		m.handleForwardingTraffic(fwdSession.ctx, listener, fwdSession.internalHost, fwdSession.internalPort)
-
-		listener.Close()
-		time.Sleep(m.backoffInterval)
 	}
 }
 
-// handleForwardingTraffic forwards traffic between the remote listener and internal host.
-func (m *SSHTunnelManager) handleForwardingTraffic(ctx context.Context, listener net.Listener, internalHost string, internalPort int) {
-	// Context-aware shutdown, to avoid waiting forever on Accept()
-	go func() {
-		<-ctx.Done()
-		listener.Close()
-	}()
-
-	// keep waiting for "forwarding requests" while checking context cancellation
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		remoteConn, err := listener.Accept()
-		if err != nil {
-			slog.With("function", "handleForwardingTraffic").Warn("listener accept error", "error", err)
-			return
-		}
-
-		internalConn, err := netDial("tcp", net.JoinHostPort(internalHost, fmt.Sprintf("%d", internalPort)))
-		if err != nil {
-			slog.With("function", "handleForwardingTraffic").Warn("internal connection failed", "error", err)
-			remoteConn.Close()
-			return
-		}
-		go proxyConnection(ctx, remoteConn, internalConn)
-	}
-}
-
-// connect establishes a new SSH client connection.
-func (m *SSHTunnelManager) connect() (sshClient, error) {
+// connectClient establishes a new SSH client connection.
+// Must be called with a lock on m.clientMu
+func (m *SSHTunnelManager) connectClient() error {
 	config := &ssh.ClientConfig{
 		User:    m.sshUser,
 		Auth:    []ssh.AuthMethod{ssh.PublicKeys(m.signer)},
@@ -349,92 +436,29 @@ func (m *SSHTunnelManager) connect() (sshClient, error) {
 	if err != nil {
 		rerr := &ErrSSHConnectionFailed{Err: err}
 		slog.With("function", "connect").Error(rerr.Error())
-		return nil, rerr
+		return rerr
 	}
 
-	return client, nil
+	m.client = client
+	m.connected = true
+	m.connectionCtx, m.connectionCancel = context.WithCancel(m.externalCtx)
+
+	return nil
 }
 
-// Stop cleanly stops all forwardings and closes the SSH client connection.
 func (m *SSHTunnelManager) Stop() {
 	m.forwardingsMu.Lock()
 	defer m.forwardingsMu.Unlock()
-	for _, session := range m.forwardings {
-		session.cancel()
-	}
-	m.forwardings = make(map[string]*forwardingSession) // Clear forwardings map
+	m.clientMu.Lock()
+	defer m.clientMu.Unlock()
 
-	m.cancel()      // Cancel global context
-	m.closeClient() // Close SSH client immediately
+	for _, forwardingSession := range m.forwardings {
+		m.sendForwardingCancel(forwardingSession)
+		slog.With("function", "Stop").Info("stopped forwarding", "key", forwardingSession)
+	}
+	m.forwardings = make(map[string]*ForwardingConfig) // Clear forwardings map
+
+	m.closeClient()
 
 	slog.Info("ssh tunnel manager stopped, all forwardings and connections closed")
-}
-
-// proxyConnection proxies traffic between two io.ReadWriteClosers.
-func proxyConnection(ctx context.Context, a io.ReadWriteCloser, b io.ReadWriteCloser) {
-	// Automatically close both endpoints if the context is canceled
-	go func() {
-		<-ctx.Done()
-		a.Close()
-		b.Close()
-	}()
-
-	logger := slog.With("function", "proxyConnection")
-	logger.Info("starting proxy connection")
-
-	defer func() {
-		a.Close()
-		b.Close()
-		logger.Info("closed connections")
-	}()
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	// Channel to signal when one connection drops
-	errChan := make(chan struct{}, 1)
-
-	// internal -> remote
-	go func() {
-		defer wg.Done()
-		n, err := io.Copy(a, b)
-		if err != nil {
-			logger.Error("copy internal->remote failed", "bytes", n, "error", err)
-		} else {
-			logger.Info("copy internal->remote complete", "bytes", n)
-		}
-		// Signal that one connection has dropped
-		select {
-		case errChan <- struct{}{}:
-		default:
-		}
-	}()
-
-	// remote -> internal
-	go func() {
-		defer wg.Done()
-		n, err := io.Copy(b, a)
-		if err != nil {
-			logger.Error("copy remote->internal failed", "bytes", n, "error", err)
-		} else {
-			logger.Info("copy remote->internal complete", "bytes", n)
-		}
-		// Signal that one connection has dropped
-		select {
-		case errChan <- struct{}{}:
-		default:
-		}
-	}()
-
-	// Wait for one connection to drop or context cancellation
-	select {
-	case <-ctx.Done():
-		logger.Info("context canceled, closing connections")
-	case <-errChan:
-		logger.Warn("one connection dropped, closing the other")
-	}
-
-	// Wait for both goroutines to finish
-	wg.Wait()
-	logger.Info("finished proxy connection")
 }

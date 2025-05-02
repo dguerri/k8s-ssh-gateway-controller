@@ -117,7 +117,7 @@ func createSSHManager(ctx context.Context) (*sshmgr.SSHTunnelManager, error) {
 		BackoffInterval:   backoffInterval,
 	}
 
-	return sshmgr.NewSSHTunnelManager(ctx, sshConfig)
+	return sshmgr.NewSSHTunnelManager(ctx, &sshConfig)
 }
 
 func getSvcHostname(svcName, svcNamespace string) string {

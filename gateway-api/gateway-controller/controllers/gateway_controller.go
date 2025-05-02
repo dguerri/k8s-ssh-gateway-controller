@@ -32,10 +32,18 @@ type Listener struct {
 }
 
 type gateway struct {
-	manager *sshmgr.SSHTunnelManager
-
 	listeners   map[string]*Listener
 	listenersMu sync.Mutex
+}
+
+type GatewayReconciler struct {
+	manager *sshmgr.SSHTunnelManager
+
+	client.Client
+	Scheme *runtime.Scheme
+
+	gateways   map[string]*gateway
+	gatewaysMu sync.Mutex
 }
 
 // SetRoute sets up forwarding for a specific route on a listener.
@@ -53,8 +61,9 @@ func (r *GatewayReconciler) SetRoute(gwNamespace, gwName, listenerName, routeNam
 
 	if l, exist := gw.listeners[listenerName]; exist {
 		if l.route != nil {
+			return nil
 			// Stop the forwarding.
-			err := gw.manager.StopForwarding(&sshmgr.ForwardingConfig{
+			err := r.manager.StopForwarding(&sshmgr.ForwardingConfig{
 				RemoteHost:   l.Hostname,
 				RemotePort:   l.Port,
 				InternalHost: l.route.Host,
@@ -71,7 +80,7 @@ func (r *GatewayReconciler) SetRoute(gwNamespace, gwName, listenerName, routeNam
 			Host:      backendHost,
 			Port:      backendPort,
 		}
-		err := gw.manager.StartForwarding(&sshmgr.ForwardingConfig{
+		err := r.manager.StartForwarding(sshmgr.ForwardingConfig{
 			RemoteHost:   l.Hostname,
 			RemotePort:   l.Port,
 			InternalHost: route.Host,
@@ -106,7 +115,7 @@ func (r *GatewayReconciler) RemoveRoute(gwNamespace, gwName, listenerName, route
 	defer gw.listenersMu.Unlock()
 
 	if l, exist := gw.listeners[listenerName]; exist && l.route != nil && l.route.Name == routeName && l.route.Namespace == routeNamespace {
-		err := gw.manager.StopForwarding(&sshmgr.ForwardingConfig{
+		err := r.manager.StopForwarding(&sshmgr.ForwardingConfig{
 			RemoteHost:   l.Hostname,
 			RemotePort:   l.Port,
 			InternalHost: l.route.Host,
@@ -124,16 +133,15 @@ func (r *GatewayReconciler) RemoveRoute(gwNamespace, gwName, listenerName, route
 	return &ErrRouteNotFound{fmt.Sprintf("route not found: %s/%s", routeNamespace, routeName)}
 }
 
-type GatewayReconciler struct {
-	client.Client
-	Scheme *runtime.Scheme
-
-	gateways   map[string]*gateway
-	gatewaysMu sync.Mutex
-}
-
 func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.gateways = make(map[string]*gateway)
+	ctx := context.Background()
+	manager, err := createSSHManager(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to create SSH manager for gateway controller: %w", err)
+	}
+	r.manager = manager
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1.Gateway{}).
 		Complete(r)
@@ -186,15 +194,8 @@ func (r *GatewayReconciler) handleAddOrUpdateGateway(ctx context.Context, k8sGw 
 	gw, exists := r.gateways[gwKey]
 	if !exists {
 		slog.With("function", "handleAddOrUpdateGateway").Info("creating a new gateway", "gatewayKey", gwKey)
-		mgr, err := createSSHManager(ctx)
-		if err != nil {
-			slog.With("function", "handleAddOrUpdateGateway", "gatewayKey", gwKey).Error("failed to create SSH manager", "error", err)
-			return fmt.Errorf("failed to create SSH manager for gateway %s: %w", gwKey, err)
-		}
-		slog.With("function", "handleAddOrUpdateGateway").Info("SSHTunnelManager created for Gateway", "gateway", gwKey)
 
 		gw = &gateway{
-			manager:   mgr,
 			listeners: make(map[string]*Listener),
 		}
 		for _, k8sListener := range k8sGw.Spec.Listeners {
@@ -220,7 +221,7 @@ func (r *GatewayReconciler) handleAddOrUpdateGateway(ctx context.Context, k8sGw 
 					slog.With("function", "handleAddOrUpdateGateway").Info("listener configuration changed, updating", "listener", listenerName)
 					// Stop existing forwarding if are not longer needed
 					if existing.route != nil {
-						gw.manager.StopForwarding(&sshmgr.ForwardingConfig{
+						r.manager.StopForwarding(&sshmgr.ForwardingConfig{
 							RemoteHost:   existing.Hostname,
 							RemotePort:   existing.Port,
 							InternalHost: existing.route.Host,
@@ -246,8 +247,27 @@ func (r *GatewayReconciler) handleDeleteGateway(_ context.Context, k8sGw *gatewa
 	gwKey := getGwKey(k8sGw.Namespace, k8sGw.Name)
 	r.gatewaysMu.Lock()
 	defer r.gatewaysMu.Unlock()
+
 	if gw, ok := r.gateways[gwKey]; ok {
-		gw.manager.Stop()
+		gw.listenersMu.Lock()
+		defer gw.listenersMu.Unlock()
+		// Delete listeners and stop forwardings
+		for _, listener := range gw.listeners {
+			if listener.route != nil {
+				err := r.manager.StopForwarding(&sshmgr.ForwardingConfig{
+					RemoteHost:   listener.Hostname,
+					RemotePort:   listener.Port,
+					InternalHost: listener.route.Host,
+					InternalPort: listener.route.Port,
+				})
+				if err != nil {
+					slog.With("function", "handleDeleteGateway").Error("failed to stop forwarding", "error", err)
+				} else {
+					slog.With("function", "handleDeleteGateway").Info("stopped forwarding for listener", "listener", listener.Hostname)
+				}
+			}
+			delete(gw.listeners, listener.Hostname)
+		}
 		delete(r.gateways, gwKey)
 		slog.With("function", "handleDeleteGateway").Info("SSHTunnelManager stopped for Gateway", "gateway", gwKey)
 	}

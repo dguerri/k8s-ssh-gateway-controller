@@ -64,6 +64,11 @@ func (f *fakeClient) SendRequest(name string, wantReply bool, payload []byte) (b
 	return true, nil, nil
 }
 
+// SendRequest sends a request to the server.
+func (f *fakeClient) HandleChannelOpen(string) <-chan ssh.NewChannel {
+	return make(chan ssh.NewChannel)
+}
+
 // Close closes the client.
 func (f *fakeClient) Close() error { return nil }
 
@@ -131,7 +136,7 @@ func TestNewSSHTunnelManagerWithInvalidKey(t *testing.T) {
 		BackoffInterval:   2 * time.Second,
 	}
 
-	manager, err := NewSSHTunnelManager(ctx, sshConfig)
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
 	if err == nil {
 		t.Fatalf("Expected an error")
 	}
@@ -157,7 +162,7 @@ func TestNewSSHTunnelManager(t *testing.T) {
 		BackoffInterval:   2 * time.Second,
 	}
 
-	manager, err := NewSSHTunnelManager(ctx, sshConfig)
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
 	if err != nil {
 		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 	}
@@ -183,13 +188,13 @@ func TestForwardingManagement(t *testing.T) {
 		BackoffInterval:   2 * time.Second,
 	}
 
-	manager, err := NewSSHTunnelManager(ctx, sshConfig)
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
 	if err != nil {
 		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 	}
 	manager.WaitConnection()
 
-	fwd := &ForwardingConfig{
+	fwd := ForwardingConfig{
 		RemoteHost:   "0.0.0.0",
 		RemotePort:   2222,
 		InternalHost: "localhost",
@@ -212,11 +217,11 @@ func TestForwardingManagement(t *testing.T) {
 	// Give time to the forwarding goroutine to start.
 	time.Sleep(100 * time.Millisecond)
 
-	if err := manager.StopForwarding(fwd); err != nil {
+	if err := manager.StopForwarding(&fwd); err != nil {
 		t.Errorf("Unexpected error on StopForwarding")
 	}
 
-	if err := manager.StopForwarding(fwd); err == nil {
+	if err := manager.StopForwarding(&fwd); err == nil {
 		t.Errorf("Should fail because of non-existing forewarding")
 	} else {
 		var notFoundErr *ErrSSHForwardingNotFound
@@ -247,7 +252,7 @@ func TestNewSSHTunnelManagerFailingDialKeepsTrying(t *testing.T) {
 		BackoffInterval:   10 * time.Millisecond, // Quicker re-Dial
 	}
 
-	manager, err := NewSSHTunnelManager(ctx, sshConfig)
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
 	if err != nil {
 		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 	}
@@ -280,14 +285,14 @@ func TestDuplicateForwarding(t *testing.T) {
 		BackoffInterval:   2 * time.Second,
 	}
 
-	manager, err := NewSSHTunnelManager(ctx, sshConfig)
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
 	if err != nil {
 		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 	}
 
 	manager.WaitConnection()
 
-	fwd := &ForwardingConfig{
+	fwd := ForwardingConfig{
 		RemoteHost:   "0.0.0.0",
 		RemotePort:   2222,
 		InternalHost: "localhost",
@@ -324,7 +329,7 @@ func TestStopForwardingNonExisting(t *testing.T) {
 		BackoffInterval:   2 * time.Second,
 	}
 
-	manager, err := NewSSHTunnelManager(ctx, sshConfig)
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
 	if err != nil {
 		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 	}
@@ -364,14 +369,14 @@ func TestCloseStopsForwardings(t *testing.T) {
 		BackoffInterval:   2 * time.Second,
 	}
 
-	manager, err := NewSSHTunnelManager(ctx, sshConfig)
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
 	if err != nil {
 		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 	}
 
 	manager.WaitConnection()
 
-	fwd := &ForwardingConfig{
+	fwd := ForwardingConfig{
 		RemoteHost:   "0.0.0.0",
 		RemotePort:   2223,
 		InternalHost: "localhost",
