@@ -104,6 +104,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 // extractHTTPRouteDetails extracts common route details from the resource.
 func extractHTTPRouteDetails(k8sRoute *gatewayv1.HTTPRoute) (*routeDetails, error) {
+	// Validate ParentRefs
 	if len(k8sRoute.Spec.ParentRefs) < 1 {
 		return nil, fmt.Errorf("HTTPRoute %s/%s must have at least one ParentRef", k8sRoute.Namespace, k8sRoute.Name)
 	}
@@ -113,6 +114,26 @@ func extractHTTPRouteDetails(k8sRoute *gatewayv1.HTTPRoute) (*routeDetails, erro
 	}
 	parent := k8sRoute.Spec.ParentRefs[0]
 
+	// Validate ParentRef.Name
+	if parent.Name == "" {
+		return nil, fmt.Errorf("ParentRef name is empty for HTTPRoute %s/%s", k8sRoute.Namespace, k8sRoute.Name)
+	}
+
+	// Default ParentRef.Namespace
+	parentNamespace := k8sRoute.Namespace // Default to the HTTPRoute's namespace
+	if parent.Namespace != nil {
+		parentNamespace = string(*parent.Namespace)
+	} else {
+		slog.With("route", fmt.Sprintf("%s/%s", k8sRoute.Namespace, k8sRoute.Name)).
+			Debug("ParentRef namespace is nil, defaulting to HTTPRoute namespace")
+	}
+
+	// Validate ParentRef.SectionName
+	if parent.SectionName == nil {
+		return nil, fmt.Errorf("ParentRef sectionName is nil for HTTPRoute %s/%s", k8sRoute.Namespace, k8sRoute.Name)
+	}
+
+	// Validate Rules
 	if len(k8sRoute.Spec.Rules) < 1 {
 		return nil, fmt.Errorf("HTTPRoute %s/%s must have at least one Rule", k8sRoute.Namespace, k8sRoute.Name)
 	}
@@ -122,6 +143,7 @@ func extractHTTPRouteDetails(k8sRoute *gatewayv1.HTTPRoute) (*routeDetails, erro
 	}
 	rule := k8sRoute.Spec.Rules[0]
 
+	// Validate BackendRefs
 	if len(rule.BackendRefs) < 1 {
 		return nil, fmt.Errorf("HTTPRoute %s/%s must have at least one BackendRef", k8sRoute.Namespace, k8sRoute.Name)
 	}
@@ -131,13 +153,38 @@ func extractHTTPRouteDetails(k8sRoute *gatewayv1.HTTPRoute) (*routeDetails, erro
 	}
 	k8Svc := rule.BackendRefs[0]
 
+	// Validate BackendRef.Name
+	if k8Svc.Name == "" {
+		return nil, fmt.Errorf("BackendRef name is empty for HTTPRoute %s/%s", k8sRoute.Namespace, k8sRoute.Name)
+	}
+
+	// Validate BackendRef.Port
+	if k8Svc.Port == nil {
+		return nil, fmt.Errorf("BackendRef port is nil for HTTPRoute %s/%s", k8sRoute.Namespace, k8sRoute.Name)
+	}
+
+	// Default BackendRef.Namespace
+	backendNamespace := k8sRoute.Namespace // Default to the HTTPRoute's namespace
+	if k8Svc.Namespace != nil {
+		backendNamespace = string(*k8Svc.Namespace)
+	} else {
+		slog.With("route", fmt.Sprintf("%s/%s", k8sRoute.Namespace, k8sRoute.Name)).
+			Debug("BackendRef namespace is nil, defaulting to HTTPRoute namespace")
+	}
+
+	// Validate HTTPRoute.Namespace
+	if k8sRoute.Namespace == "" {
+		return nil, fmt.Errorf("HTTPRoute namespace is nil or empty for HTTPRoute %s", k8sRoute.Name)
+	}
+
 	return &routeDetails{
 		routeName:      string(k8sRoute.Name),
 		routeNamespace: string(k8sRoute.Namespace),
 		gwName:         string(parent.Name),
-		gwNamespace:    string(*parent.Namespace),
+		gwNamespace:    parentNamespace,
 		listenerName:   string(*parent.SectionName),
-		backendHost:    getSvcHostname(string(k8Svc.Name), string(*k8Svc.Namespace)),
+		backendHost:    getSvcHostname(string(k8Svc.Name), backendNamespace),
 		backendPort:    int(*k8Svc.Port),
 	}, nil
+
 }
