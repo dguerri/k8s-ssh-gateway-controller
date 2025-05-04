@@ -244,6 +244,8 @@ func (m *SSHTunnelManager) StartForwarding(fwd ForwardingConfig) error {
 	// Store the forwarding session
 	m.forwardings[key] = &fwd
 
+	slog.With("function", "StartForwarding").Info("started forwarding", "key", key)
+
 	return nil
 }
 
@@ -380,24 +382,24 @@ func (m *SSHTunnelManager) handleChannels() {
 							go func() {
 								defer wg.Done()
 								n, err := io.Copy(remoteConn, localConn)
-								slog.With("function", "HandleChannels").Info("copied data from local to remote", "bytes", n, "error", err)
+								slog.With("function", "HandleChannels").Debug("copied data from local to remote", "bytes", n, "error", err)
 								remoteConn.CloseWrite()
 							}()
 
 							go func() {
 								defer wg.Done()
 								n, err := io.Copy(localConn, remoteConn)
-								slog.With("function", "HandleChannels").Info("copied data from remote to local", "bytes", n, "error", err)
+								slog.With("function", "HandleChannels").Debug("copied data from remote to local", "bytes", n, "error", err)
 								if cw, ok := localConn.(interface{ CloseWrite() error }); ok {
 									cw.CloseWrite()
 								}
 							}()
 
 							wg.Wait()
-							slog.With("function", "HandleChannels").Info("channel closed")
+							slog.With("function", "HandleChannels").Debug("channel closed")
 						}()
 					}(ch)
-					logger.Info("forwarding established", "key", key)
+					logger.Debug("forwarding established", "key", key)
 				} else {
 					logger.Warn("unable to find forwarding session")
 					ch.Reject(ssh.ConnectionFailed, "unable to find forwarding session")

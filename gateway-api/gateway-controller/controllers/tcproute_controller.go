@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 )
 
@@ -25,21 +26,22 @@ type TCPRouteReconciler struct {
 func (r *TCPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1alpha2.TCPRoute{}).
+		WithEventFilter(predicate.GenerationChangedPredicate{}). // only trigger on spec changes
 		Complete(r)
 }
 
 func (r *TCPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	r.dumpAllTCPRoutes(ctx)
+	slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Debug("starting reconciliation")
 
 	var k8sRoute gatewayv1alpha2.TCPRoute
 	if err := r.Get(ctx, req.NamespacedName, &k8sRoute); err != nil {
-		slog.With("function", "Reconcile").Info("unable to retrieve TCPRoute", "tcp route", req.NamespacedName)
+		slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Debug("unable to retrieve TCPRoute", "error", err)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	routeDetails, err := extractTCPRouteDetails(&k8sRoute)
 	if err != nil {
-		slog.Error("Failed to extract TCPRoute details", "error", err)
+		slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Error("failed to extract TCPRoute details", "error", err)
 		return ctrl.Result{}, err
 	}
 
@@ -50,6 +52,7 @@ func (r *TCPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if !containsString(k8sRoute.Finalizers, tcpRouteFinalizer) {
 			k8sRoute.Finalizers = append(k8sRoute.Finalizers, tcpRouteFinalizer)
 			if err := r.Update(ctx, &k8sRoute); err != nil {
+				slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Error("failed to add finalizer", "error", err)
 				return ctrl.Result{}, err
 			}
 		}
@@ -63,13 +66,13 @@ func (r *TCPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			var notReadyErr *ErrGatewayNotReady
 			var notFoundErr *ErrGatewayNotFound
 			if errors.As(err, &notReadyErr) || errors.As(err, &notFoundErr) {
-				slog.With("route", fmt.Sprintf("%s/%s", k8sRoute.Namespace, k8sRoute.Name)).
-					Info("gateway not ready, requeuing TCPRoute")
-					// Requeue the request after a short delay
+				slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Debug("gateway not ready, requeuing TCPRoute")
 				return ctrl.Result{Requeue: true, RequeueAfter: 1 * time.Second}, nil
 			}
+			slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Error("failed to set route", "error", err)
 			return ctrl.Result{}, err
 		}
+		slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Debug("route set successfully")
 	} else {
 		// Handle deletion
 		if containsString(k8sRoute.Finalizers, tcpRouteFinalizer) {
@@ -82,50 +85,51 @@ func (r *TCPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 				var gwNotFoundErr *ErrGatewayNotFound
 				var routeNotFoundErr *ErrRouteNotFound
 				if !errors.As(err, &gwNotFoundErr) && !errors.As(err, &routeNotFoundErr) {
+					slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Error("failed to remove route", "error", err)
 					return ctrl.Result{}, err
 				}
 				// Gateway or route were deleted, no need to requeue
 			}
+			// Gateway or route were deleted, no need to requeue
 
 			k8sRoute.Finalizers = removeString(k8sRoute.Finalizers, tcpRouteFinalizer)
 			if err := r.Update(ctx, &k8sRoute); err != nil {
+				slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Error("failed to remove finalizer", "error", err)
 				return ctrl.Result{}, err
 			}
+			slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Debug("route removed successfully")
 		}
 	}
 
 	return ctrl.Result{}, nil
 }
 
-// extractHTTPRouteDetails extracts common route details from the resource.
+// extractTCPRouteDetails extracts common route details from the resource.
 func extractTCPRouteDetails(k8sRoute *gatewayv1alpha2.TCPRoute) (*routeDetails, error) {
-	// Check ParentRefs
 	if len(k8sRoute.Spec.ParentRefs) < 1 {
-		return nil, fmt.Errorf("HTTPRoute %s/%s must have at least one ParentRef", k8sRoute.Namespace, k8sRoute.Name)
+		return nil, fmt.Errorf("TCPRoute %s/%s must have at least one ParentRef", k8sRoute.Namespace, k8sRoute.Name)
 	}
 	if len(k8sRoute.Spec.ParentRefs) > 1 {
 		slog.With("route", fmt.Sprintf("%s/%s", k8sRoute.Namespace, k8sRoute.Name)).
-			Warn("HTTPRoute has more than one ParentRef, only the first will be used")
+			Debug("TCPRoute has more than one ParentRef, only the first will be used")
 	}
 	parent := k8sRoute.Spec.ParentRefs[0]
 
-	// Check Rules
 	if len(k8sRoute.Spec.Rules) < 1 {
-		return nil, fmt.Errorf("HTTPRoute %s/%s must have at least one Rule", k8sRoute.Namespace, k8sRoute.Name)
+		return nil, fmt.Errorf("TCPRoute %s/%s must have at least one Rule", k8sRoute.Namespace, k8sRoute.Name)
 	}
 	if len(k8sRoute.Spec.Rules) > 1 {
 		slog.With("route", fmt.Sprintf("%s/%s", k8sRoute.Namespace, k8sRoute.Name)).
-			Warn("HTTPRoute has more than one Rule, only the first will be used")
+			Debug("TCPRoute has more than one Rule, only the first will be used")
 	}
 	rule := k8sRoute.Spec.Rules[0]
 
-	// Check BackendRefs
 	if len(rule.BackendRefs) < 1 {
-		return nil, fmt.Errorf("HTTPRoute %s/%s must have at least one BackendRef", k8sRoute.Namespace, k8sRoute.Name)
+		return nil, fmt.Errorf("TCPRoute %s/%s must have at least one BackendRef", k8sRoute.Namespace, k8sRoute.Name)
 	}
 	if len(rule.BackendRefs) > 1 {
 		slog.With("route", fmt.Sprintf("%s/%s", k8sRoute.Namespace, k8sRoute.Name)).
-			Warn("HTTPRoute Rule has more than one BackendRef, only the first will be used")
+			Debug("TCPRoute Rule has more than one BackendRef, only the first will be used")
 	}
 	k8Svc := rule.BackendRefs[0]
 
@@ -138,44 +142,4 @@ func extractTCPRouteDetails(k8sRoute *gatewayv1alpha2.TCPRoute) (*routeDetails, 
 		backendHost:    getSvcHostname(string(k8Svc.Name), string(*k8Svc.Namespace)),
 		backendPort:    int(*k8Svc.Port),
 	}, nil
-}
-
-func (r *TCPRouteReconciler) dumpAllTCPRoutes(ctx context.Context) {
-	slog.Info("dumping all TCPRoutes from internal context:")
-	r.GatewayReconciler.gatewaysMu.Lock()
-	for gwKey, gw := range r.GatewayReconciler.gateways {
-		gw.listenersMu.Lock()
-		for listenerKey, listener := range gw.listeners {
-			if listener.route != nil {
-				slog.Info("TCPRoute found in internal context",
-					"gateway", gwKey,
-					"listener", listenerKey,
-					"routeName", listener.route.Name,
-					"routeNamespace", listener.route.Namespace,
-					"backendHost", listener.route.Host,
-					"backendPort", listener.route.Port,
-				)
-			}
-		}
-		gw.listenersMu.Unlock()
-	}
-	r.GatewayReconciler.gatewaysMu.Unlock()
-
-	slog.Info("dumping all TCPRoutes from Kubernetes:")
-	var tcpRoutes gatewayv1alpha2.TCPRouteList
-	if err := r.List(ctx, &tcpRoutes); err != nil {
-		slog.Error("failed to list TCPRoutes from Kubernetes", "error", err)
-		return
-	}
-
-	for _, route := range tcpRoutes.Items {
-		for _, parentRef := range route.Spec.ParentRefs {
-			slog.Info("TCPRoute found in Kubernetes",
-				"routeName", route.Name,
-				"routeNamespace", route.Namespace,
-				"parentGateway", fmt.Sprintf("%s/%s", *parentRef.Namespace, parentRef.Name),
-				"listener", *parentRef.SectionName,
-			)
-		}
-	}
 }

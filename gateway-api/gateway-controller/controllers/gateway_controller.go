@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	sshmgr "github.com/dguerri/pico-sh-gateway-api-controller/ssh"
@@ -61,7 +62,6 @@ func (r *GatewayReconciler) SetRoute(gwNamespace, gwName, listenerName, routeNam
 
 	if l, exist := gw.listeners[listenerName]; exist {
 		if l.route != nil {
-			return nil
 			// Stop the forwarding.
 			err := r.manager.StopForwarding(&sshmgr.ForwardingConfig{
 				RemoteHost:   l.Hostname,
@@ -94,7 +94,7 @@ func (r *GatewayReconciler) SetRoute(gwNamespace, gwName, listenerName, routeNam
 		}
 		// Forwarding is set, add the new route
 		l.route = &route
-		slog.With("function", "SetRoute", "gateway", gwNamespace+"/"+gwName, "listener", listenerName).Info("route set successfully")
+		slog.With("function", "SetRoute", "gateway", gwNamespace+"/"+gwName, "listener", listenerName).Debug("route set successfully")
 	} else {
 		return fmt.Errorf("listener not found: %s", listenerName)
 	}
@@ -126,7 +126,7 @@ func (r *GatewayReconciler) RemoveRoute(gwNamespace, gwName, listenerName, route
 			return fmt.Errorf("failed to stop forwarding: %s", err)
 		}
 		l.route = nil
-		slog.With("function", "RemoveRoute", "gateway", gwNamespace+"/"+gwName, "listener", listenerName).Info("route removed successfully")
+		slog.With("function", "RemoveRoute", "gateway", gwNamespace+"/"+gwName, "listener", listenerName).Debug("route removed successfully")
 		return nil
 	}
 
@@ -144,16 +144,17 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1.Gateway{}).
+		WithEventFilter(predicate.GenerationChangedPredicate{}). // only trigger on spec changes
 		Complete(r)
 }
 
 func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	key := fmt.Sprintf("%s/%s", req.Namespace, req.Name)
-	slog.With("function", "Reconcile").Info("reconciling Gateway", "gateway", key, "request", req)
+	slog.With("function", "Reconcile").Debug("reconciling Gateway", "gateway", key, "request", req)
 
 	var k8sGw gatewayv1.Gateway
 	if err := r.Get(ctx, req.NamespacedName, &k8sGw); err != nil {
-		slog.With("function", "Reconcile").Info("unable to retrieve gateway", "gateway", req.NamespacedName)
+		slog.With("function", "Reconcile").Debug("unable to retrieve gateway", "gateway", req.NamespacedName)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -177,7 +178,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			r.handleDeleteGateway(ctx, &k8sGw)
 			k8sGw.Finalizers = removeString(k8sGw.Finalizers, gatewayFinalizer)
 			if err := r.Update(ctx, &k8sGw); err != nil {
-				slog.Error("failed to remove finalizer", "gateway", key, "error", err)
+				slog.With("function", "Reconcile").Error("failed to remove finalizer", "gateway", key, "error", err)
 				return ctrl.Result{}, err
 			}
 		}
@@ -193,7 +194,7 @@ func (r *GatewayReconciler) handleAddOrUpdateGateway(ctx context.Context, k8sGw 
 	gwKey := getGwKey(k8sGw.Namespace, k8sGw.Name)
 	gw, exists := r.gateways[gwKey]
 	if !exists {
-		slog.With("function", "handleAddOrUpdateGateway").Info("creating a new gateway", "gatewayKey", gwKey)
+		slog.With("function", "handleAddOrUpdateGateway").Debug("creating a new gateway", "gatewayKey", gwKey)
 
 		gw = &gateway{
 			listeners: make(map[string]*Listener),
@@ -204,7 +205,7 @@ func (r *GatewayReconciler) handleAddOrUpdateGateway(ctx context.Context, k8sGw 
 		}
 		r.gateways[gwKey] = gw
 	} else {
-		slog.With("function", "handleAddOrUpdateGateway").Info("updating existing gateway", "gatewayKey", gwKey)
+		slog.With("function", "handleAddOrUpdateGateway").Debug("updating existing gateway", "gatewayKey", gwKey)
 		gw.listenersMu.Lock()
 		defer gw.listenersMu.Unlock()
 
@@ -218,8 +219,8 @@ func (r *GatewayReconciler) handleAddOrUpdateGateway(ctx context.Context, k8sGw 
 			if existing, exists := existingListeners[listenerName]; exists {
 				if existing.Port != listener.Port || existing.Hostname != listener.Hostname {
 					// Listener configuration changed, handle accordingly
-					slog.With("function", "handleAddOrUpdateGateway").Info("listener configuration changed, updating", "listener", listenerName)
-					// Stop existing forwarding if are not longer needed
+					slog.With("function", "handleAddOrUpdateGateway").Debug("listener configuration changed, updating", "listener", listenerName)
+					// Stop existing forwarding if no longer needed
 					if existing.route != nil {
 						r.manager.StopForwarding(&sshmgr.ForwardingConfig{
 							RemoteHost:   existing.Hostname,
@@ -236,12 +237,12 @@ func (r *GatewayReconciler) handleAddOrUpdateGateway(ctx context.Context, k8sGw 
 		gw.listeners = updatedListeners
 	}
 
-	slog.With("function", "handleAddOrUpdateGateway", "gateway", gwKey, "listenerCount", len(k8sGw.Spec.Listeners)).Info("gateway processed successfully")
+	slog.With("function", "handleAddOrUpdateGateway", "gateway", gwKey, "listenerCount", len(k8sGw.Spec.Listeners)).Debug("gateway processed successfully")
 	return nil
 }
 
 func (r *GatewayReconciler) handleDeleteGateway(_ context.Context, k8sGw *gatewayv1.Gateway) {
-	slog.With("function", "handleDeleteGateway").Info("handling Delete Gateway", "namespace", k8sGw.Namespace, "name", k8sGw.Name)
+	slog.With("function", "handleDeleteGateway").Debug("handling Delete Gateway", "namespace", k8sGw.Namespace, "name", k8sGw.Name)
 
 	// Clean up single manager for this Gateway
 	gwKey := getGwKey(k8sGw.Namespace, k8sGw.Name)
@@ -263,12 +264,12 @@ func (r *GatewayReconciler) handleDeleteGateway(_ context.Context, k8sGw *gatewa
 				if err != nil {
 					slog.With("function", "handleDeleteGateway").Error("failed to stop forwarding", "error", err)
 				} else {
-					slog.With("function", "handleDeleteGateway").Info("stopped forwarding for listener", "listener", listener.Hostname)
+					slog.With("function", "handleDeleteGateway").Debug("stopped forwarding for listener", "listener", listener.Hostname)
 				}
 			}
 			delete(gw.listeners, listener.Hostname)
 		}
 		delete(r.gateways, gwKey)
-		slog.With("function", "handleDeleteGateway").Info("SSHTunnelManager stopped for Gateway", "gateway", gwKey)
+		slog.With("function", "handleDeleteGateway").Debug("SSHTunnelManager stopped for Gateway", "gateway", gwKey)
 	}
 }
