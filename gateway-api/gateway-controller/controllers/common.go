@@ -26,6 +26,9 @@ var connectTimeout = getEnvOrDefault("CONNECT_TIMEOUT", defaultConnectTimeout)
 var sshServer = getEnvOrDefault("SSH_SERVER", defaultSSHServer)
 var sshUsername = getEnvOrDefault("SSH_USERNAME", defaultSSHUsername)
 
+// Dependency injection for testing purposes
+var osReadFile = os.ReadFile
+
 // routeDetails holds the extracted details of a route.
 type routeDetails struct {
 	routeName      string
@@ -56,13 +59,6 @@ func removeString(slice []string, s string) []string {
 		}
 	}
 	return result
-}
-
-// loadPrivateKey loads an SSH private key from file
-func loadPrivateKey(keyPath string) (key []byte, err error) {
-	key, err = os.ReadFile(keyPath)
-
-	return
 }
 
 func getEnvOrDefault[T any](key string, defaultValue T) T {
@@ -103,7 +99,7 @@ func createListener(k8sListener gatewayv1.Listener) *Listener {
 }
 
 func createSSHManager(ctx context.Context) (*sshmgr.SSHTunnelManager, error) {
-	key, err := loadPrivateKey(keyPath)
+	key, err := osReadFile(keyPath)
 	if err != nil {
 		return nil, fmt.Errorf("could not load private key: %w", err)
 	}
