@@ -132,7 +132,7 @@ func (m *SSHTunnelManager) handleConnection() {
 			time.Sleep(m.backoffInterval)
 			continue
 		}
-		slog.With("function", "handleConnection").Info("ssh connection established")
+		slog.With("function", "handleConnection").Debug("ssh connection established")
 
 		select {
 		case <-m.externalCtx.Done():
@@ -146,10 +146,10 @@ func (m *SSHTunnelManager) handleConnection() {
 		m.forwardingsMu.Lock()
 		// Restart existing forwardings, in case of reconnection
 		for key, forwardingSession := range m.forwardings {
-			slog.With("function", "handleConnection").Info("restarting forwarding", "key", forwardingSession)
+			slog.With("function", "handleConnection").Debug("restarting forwarding", "key", key)
 			err := m.sendForwardingRequest(forwardingSession)
 			if err != nil {
-				slog.With("function", "handleConnection").Error("failed to send forwarding request, removing forwarding", "error", err)
+				slog.With("function", "handleConnection").Error("failed to send forwarding request, removing forwarding", "error", err, "key", key)
 				delete(m.forwardings, key)
 				continue
 			}
@@ -180,14 +180,14 @@ func (m *SSHTunnelManager) monitorConnection() {
 			return
 		case <-ticker.C:
 			if m.connectionCtx.Err() != nil {
-				slog.With("function", "monitorConnection").Warn("ssh connection context cancelled")
+				slog.With("function", "monitorConnection").Debug("ssh connection context cancelled")
 				return
 			}
 			if _, _, err := m.client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
-				slog.With("function", "monitorConnection").Warn("ssh keepalive failed, reconnecting", "error", err)
+				slog.With("function", "monitorConnection").Error("ssh keepalive failed, reconnecting", "error", err)
 				return
 			}
-			slog.With("function", "monitorConnection").Info("ssh keepalive sent")
+			slog.With("function", "monitorConnection").Debug("ssh keepalive sent")
 		}
 	}
 }
@@ -264,7 +264,7 @@ func (m *SSHTunnelManager) sendForwardingRequest(fwd *ForwardingConfig) error {
 		slog.With("function", "sendForwardingRequest").Error("tcpip-forward request denied by server")
 		return fmt.Errorf("ssh: tcpip-forward request denied by server")
 	}
-	slog.With("function", "sendForwardingRequest").Info("tcpip-forward request accepted", "key", forwardingKey(fwd.RemoteHost, fwd.RemotePort))
+	slog.With("function", "sendForwardingRequest").Debug("tcpip-forward request accepted", "remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
 	return nil
 }
 
@@ -321,14 +321,14 @@ func (m *SSHTunnelManager) sendForwardingCancel(fwd *ForwardingConfig) error {
 func (m *SSHTunnelManager) handleChannels() {
 	tcpipChan := m.client.HandleChannelOpen("forwarded-tcpip")
 	for {
-		slog.Info("waiting for new channels")
+		slog.Debug("waiting for new channels")
 		select {
 		case <-m.connectionCtx.Done():
-			slog.With("function", "handleChannels").Warn("connection context cancelled, stopping channel handling")
+			slog.With("function", "handleChannels").Debug("connection context cancelled, stopping channel handling")
 			return
 		case ch := <-tcpipChan:
 			if ch == nil {
-				slog.With("function", "handleChannels").Warn("received nil channel, stopping channel handling")
+				slog.With("function", "handleChannels").Debug("received nil channel, stopping channel handling")
 				return
 			}
 
@@ -345,7 +345,7 @@ func (m *SSHTunnelManager) handleChannels() {
 					continue
 				}
 
-				logger.Info("forwarded-tcpip channel opened", "remote_addr", payload.Addr, "remote_port", payload.Port, "origin_addr", payload.OriginAddr, "origin_port", payload.OriginPort)
+				logger.Debug("forwarded-tcpip channel opened", "remote_addr", payload.Addr, "remote_port", payload.Port, "origin_addr", payload.OriginAddr, "origin_port", payload.OriginPort)
 
 				key := forwardingKey(payload.Addr, int(payload.Port))
 				m.forwardingsMu.Lock()
@@ -358,7 +358,7 @@ func (m *SSHTunnelManager) handleChannels() {
 							logger.Error("failed to accept channel", "error", acceptErr)
 							return
 						}
-						logger.Info("channel accepted")
+						logger.Debug("channel accepted")
 
 						// Avoid resource leak by discarding requests
 						go ssh.DiscardRequests(reqs)
@@ -399,7 +399,7 @@ func (m *SSHTunnelManager) handleChannels() {
 					}(ch)
 					logger.Info("forwarding established", "key", key)
 				} else {
-					logger.Error("unable to find forwarding session")
+					logger.Warn("unable to find forwarding session")
 					ch.Reject(ssh.ConnectionFailed, "unable to find forwarding session")
 				}
 			}
