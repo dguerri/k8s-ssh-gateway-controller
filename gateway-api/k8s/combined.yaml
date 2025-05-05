@@ -39,6 +39,15 @@ rules:
 - apiGroups: ["gateway.networking.k8s.io"]
   resources: ["httproutes"]
   verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources: ["gatewayclasses"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources: ["gateways/status"]
+  verbs: ["update", "patch"]
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources: ["gatewayclasses/status"]
+  verbs: ["update", "patch"]
 
 ---
 # Binds the ClusterRole to the ServiceAccount in the pico-sh-system namespace

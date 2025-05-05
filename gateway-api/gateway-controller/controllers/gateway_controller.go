@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"sync"
 
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -17,6 +19,7 @@ import (
 )
 
 const gatewayFinalizer = "gateway.networking.k8s.io/finalizer"
+const picoshGatewayControllerName = "tunnels.pico.sh/gateway-api-gateway-controller"
 
 type Route struct {
 	Name      string
@@ -142,6 +145,10 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	r.manager = manager
 
+	if err := RegisterGatewayClassController(mgr); err != nil {
+		return fmt.Errorf("failed to register GatewayClass controller: %w", err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1.Gateway{}).
 		WithEventFilter(predicate.GenerationChangedPredicate{}). // only trigger on spec changes
@@ -158,6 +165,16 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	var gc gatewayv1.GatewayClass
+	if err := r.Get(ctx, client.ObjectKey{Name: string(k8sGw.Spec.GatewayClassName)}, &gc); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if gc.Spec.ControllerName != picoshGatewayControllerName {
+		slog.With("function", "Reconcile").Debug("skipping Gateway: does not match controllerName", "gatewayClassName", k8sGw.Spec.GatewayClassName)
+		return ctrl.Result{}, nil
+	}
+
 	if k8sGw.DeletionTimestamp.IsZero() {
 		// Handle add or Update
 		if !containsString(k8sGw.Finalizers, gatewayFinalizer) {
@@ -170,6 +187,25 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 		err := r.handleAddOrUpdateGateway(ctx, &k8sGw)
 		if err != nil {
+			return ctrl.Result{}, err
+		}
+		// Update Gateway status with Accepted=True and Programmed=True
+		apiMeta.SetStatusCondition(&k8sGw.Status.Conditions, metav1.Condition{
+			Type:               string(gatewayv1.GatewayConditionAccepted),
+			Status:             metav1.ConditionTrue,
+			Reason:             "Accepted",
+			Message:            "Gateway accepted by controller",
+			LastTransitionTime: metav1.Now(),
+		})
+		apiMeta.SetStatusCondition(&k8sGw.Status.Conditions, metav1.Condition{
+			Type:               string(gatewayv1.GatewayConditionProgrammed),
+			Status:             metav1.ConditionTrue,
+			Reason:             "Programmed",
+			Message:            "Gateway programmed successfully",
+			LastTransitionTime: metav1.Now(),
+		})
+		if err := r.Status().Update(ctx, &k8sGw); err != nil {
+			slog.With("function", "Reconcile").Error("failed to update Gateway status", "gateway", key, "error", err)
 			return ctrl.Result{}, err
 		}
 	} else {
@@ -272,4 +308,45 @@ func (r *GatewayReconciler) handleDeleteGateway(_ context.Context, k8sGw *gatewa
 		delete(r.gateways, gwKey)
 		slog.With("function", "handleDeleteGateway").Debug("SSHTunnelManager stopped for Gateway", "gateway", gwKey)
 	}
+}
+
+type GatewayClassReconciler struct {
+	client.Client
+	Scheme *runtime.Scheme
+}
+
+func (r *GatewayClassReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	var gc gatewayv1.GatewayClass
+	if err := r.Get(ctx, req.NamespacedName, &gc); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	if gc.Spec.ControllerName != picoshGatewayControllerName {
+		return ctrl.Result{}, nil
+	}
+
+	condition := metav1.Condition{
+		Type:               string(gatewayv1.GatewayClassConditionStatusAccepted),
+		Status:             metav1.ConditionTrue,
+		Reason:             "Accepted",
+		Message:            "Controller has accepted this GatewayClass",
+		LastTransitionTime: metav1.Now(),
+	}
+
+	gc.Status.Conditions = []metav1.Condition{condition}
+	if err := r.Status().Update(ctx, &gc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to update GatewayClass status: %w", err)
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func RegisterGatewayClassController(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&gatewayv1.GatewayClass{}).
+		WithEventFilter(predicate.GenerationChangedPredicate{}).
+		Complete(&GatewayClassReconciler{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+		})
 }
