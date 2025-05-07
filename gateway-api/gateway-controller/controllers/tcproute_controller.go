@@ -165,6 +165,11 @@ func extractTCPRouteDetails(k8sRoute *gatewayv1alpha2.TCPRoute) (*routeDetails, 
 		return nil, fmt.Errorf("BackendRef port is nil for TCPRoute %s/%s", k8sRoute.Namespace, k8sRoute.Name)
 	}
 
+	// Validate TCPRoute.Namespace
+	if k8sRoute.Namespace == "" {
+		return nil, fmt.Errorf("TCPRoute namespace is nil or empty for TCPRoute %s", k8sRoute.Name)
+	}
+
 	// Default BackendRef.Namespace
 	backendNamespace := k8sRoute.Namespace // Default to the TCPRoute's namespace
 	if k8Svc.Namespace != nil {
@@ -172,11 +177,6 @@ func extractTCPRouteDetails(k8sRoute *gatewayv1alpha2.TCPRoute) (*routeDetails, 
 	} else {
 		slog.With("route", fmt.Sprintf("%s/%s", k8sRoute.Namespace, k8sRoute.Name)).
 			Debug("BackendRef namespace is nil, defaulting to TCPRoute namespace")
-	}
-
-	// Validate TCPRoute.Namespace
-	if k8sRoute.Namespace == "" {
-		return nil, fmt.Errorf("TCPRoute namespace is nil or empty for TCPRoute %s", k8sRoute.Name)
 	}
 
 	return &routeDetails{

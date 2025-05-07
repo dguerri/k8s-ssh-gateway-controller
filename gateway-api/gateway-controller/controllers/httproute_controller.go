@@ -163,6 +163,11 @@ func extractHTTPRouteDetails(k8sRoute *gatewayv1.HTTPRoute) (*routeDetails, erro
 		return nil, fmt.Errorf("BackendRef port is nil for HTTPRoute %s/%s", k8sRoute.Namespace, k8sRoute.Name)
 	}
 
+	// Validate HTTPRoute.Namespace
+	if k8sRoute.Namespace == "" {
+		return nil, fmt.Errorf("HTTPRoute namespace is nil or empty for HTTPRoute %s", k8sRoute.Name)
+	}
+
 	// Default BackendRef.Namespace
 	backendNamespace := k8sRoute.Namespace // Default to the HTTPRoute's namespace
 	if k8Svc.Namespace != nil {
@@ -170,11 +175,6 @@ func extractHTTPRouteDetails(k8sRoute *gatewayv1.HTTPRoute) (*routeDetails, erro
 	} else {
 		slog.With("route", fmt.Sprintf("%s/%s", k8sRoute.Namespace, k8sRoute.Name)).
 			Debug("BackendRef namespace is nil, defaulting to HTTPRoute namespace")
-	}
-
-	// Validate HTTPRoute.Namespace
-	if k8sRoute.Namespace == "" {
-		return nil, fmt.Errorf("HTTPRoute namespace is nil or empty for HTTPRoute %s", k8sRoute.Name)
 	}
 
 	return &routeDetails{
