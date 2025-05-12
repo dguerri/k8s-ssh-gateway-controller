@@ -231,7 +231,7 @@ func (m *SSHTunnelManager) StartForwarding(fwd ForwardingConfig) error {
 
 	if _, exists := m.forwardings[key]; exists {
 		err := &ErrSSHForwardingExists{Key: key}
-		slog.With("function", "StartForwarding").Warn(err.Error())
+		slog.With("function", "StartForwarding").Error(err.Error())
 		return err
 	}
 

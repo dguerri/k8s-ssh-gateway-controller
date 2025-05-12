@@ -94,6 +94,7 @@ func (r *GatewayReconciler) SetRoute(gwNamespace, gwName, listenerName, routeNam
 			if errors.As(err, &notReadyErr) {
 				return &ErrGatewayNotReady{msg: err.Error()}
 			}
+			return fmt.Errorf("failed to start forwarding: %s", err)
 		}
 		// Forwarding is set, add the new route
 		l.route = &route

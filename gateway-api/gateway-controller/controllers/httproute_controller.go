@@ -48,7 +48,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if k8sRoute.DeletionTimestamp.IsZero() {
 		// Add or Update.
 
-		// Add a finalizer so we can scorrectly clean up the route when it's deleted
+		// Add a finalizer so we can correctly clean up the route when it's deleted
 		if !containsString(k8sRoute.Finalizers, httpRouteFinalizer) {
 			k8sRoute.Finalizers = append(k8sRoute.Finalizers, httpRouteFinalizer)
 			if err := r.Update(ctx, &k8sRoute); err != nil {
