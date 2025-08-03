@@ -5,15 +5,27 @@ metadata:
   name: ssh-gateway-system
 
 ---
-# Secret containing the SSH private key required by the SSH Gateway API controller
+# Secret containing the SSH private key required by the SSH Gateway API controller for pico.sh
 apiVersion: v1
 kind: Secret
 metadata:
-  name: ssh-gateway-ssh-key
+  name: pico-sh-gateway-ssh-key
   namespace: ssh-gateway-system
 type: Opaque
 data:
   id: <base64-encoded-content-of-your-ssh-key>
+
+---
+# ConfigMap containing SSH Gateway controller environment variables for pico.sh
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pico-sh-gateway-controller-config
+  namespace: ssh-gateway-system
+data:
+  SSH_SERVER: "pico.sh:22"
+  SSH_USERNAME: "tunnel-user"
+  GATEWAY_CONTROLLER_NAME: "tunnels.pico-sh.gateway-api-controller"
 
 ---
 # ServiceAccount used by the SSH Gateway API controller to interact with the Kubernetes API
@@ -99,13 +111,9 @@ spec:
       containers:
       - name: controller
         image: <your-registry>/ssh-gateway-api-controller:latest
-        env:
-        - name: SSH_SERVER
-          value: "your-ssh-server:22"
-        - name: SSH_USERNAME
-          value: "your-ssh-username"
-        - name: GATEWAY_CONTROLLER_NAME
-          value: "tunnels.ssh.gateway-api-controller"
+        envFrom:
+        - configMapRef:
+            name: ssh-gateway-controller-config
         volumeMounts:
         - name: ssh-key
           mountPath: /ssh
@@ -120,5 +128,5 @@ spec:
       volumes:
       - name: ssh-key
         secret:
-          secretName: ssh-gateway-ssh-key
-          defaultMode: 256 # 0400 octal 
+          secretName: pico-sh-gateway-ssh-key
+          defaultMode: 256 # 0400 octal
