@@ -39,6 +39,7 @@ type SSHConnectionConfig struct {
 	Username          string
 	HostKey           string
 	ConnectTimeout    time.Duration
+	FwdReqTimeout     time.Duration
 	KeepAliveInterval time.Duration
 	BackoffInterval   time.Duration
 }
@@ -57,7 +58,8 @@ type SSHTunnelManager struct {
 	sshUser           string
 	hostKey           string
 	signer            ssh.Signer
-	timeout           time.Duration
+	connTimeout       time.Duration
+	fwdReqTimeout     time.Duration
 	keepAliveInterval time.Duration
 	backoffInterval   time.Duration
 	externalCtx       context.Context
@@ -89,7 +91,8 @@ func NewSSHTunnelManager(externalCtx context.Context, config *SSHConnectionConfi
 		sshUser:           config.Username,
 		hostKey:           config.HostKey,
 		signer:            signer,
-		timeout:           config.ConnectTimeout,
+		connTimeout:       config.ConnectTimeout,
+		fwdReqTimeout:     config.FwdReqTimeout,
 		keepAliveInterval: config.KeepAliveInterval,
 		backoffInterval:   config.BackoffInterval,
 		externalCtx:       externalCtx,
@@ -257,17 +260,35 @@ func (m *SSHTunnelManager) sendForwardingRequest(fwd *ForwardingConfig) error {
 		rport: uint32(fwd.RemotePort),
 	}
 
-	ok, _, err := m.client.SendRequest("tcpip-forward", true, ssh.Marshal(&forwardMessage))
-	if err != nil {
-		slog.With("function", "sendForwardingRequest").Error("tcpip-forward request failed", "error", err)
-		return err
+	result := make(chan struct {
+		ok  bool
+		err error
+	}, 1)
+
+	go func() {
+		ok, _, err := m.client.SendRequest("tcpip-forward", true, ssh.Marshal(&forwardMessage))
+		result <- struct {
+			ok  bool
+			err error
+		}{ok, err}
+	}()
+
+	select {
+	case res := <-result:
+		if res.err != nil {
+			slog.With("function", "sendForwardingRequest").Error("tcpip-forward request failed", "error", res.err)
+			return res.err
+		}
+		if !res.ok {
+			slog.With("function", "sendForwardingRequest").Error("tcpip-forward request denied by server")
+			return fmt.Errorf("ssh: tcpip-forward request denied by server")
+		}
+		slog.With("function", "sendForwardingRequest").Debug("tcpip-forward request accepted", "remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
+		return nil
+	case <-time.After(m.fwdReqTimeout):
+		slog.With("function", "sendForwardingRequest").Error("tcpip-forward request timed out")
+		return fmt.Errorf("ssh: tcpip-forward request timed out")
 	}
-	if !ok {
-		slog.With("function", "sendForwardingRequest").Error("tcpip-forward request denied by server")
-		return fmt.Errorf("ssh: tcpip-forward request denied by server")
-	}
-	slog.With("function", "sendForwardingRequest").Debug("tcpip-forward request accepted", "remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
-	return nil
 }
 
 // StopForwarding stops an existing forwarding based on the provided configuration.
@@ -415,7 +436,7 @@ func (m *SSHTunnelManager) connectClient() error {
 	config := &ssh.ClientConfig{
 		User:    m.sshUser,
 		Auth:    []ssh.AuthMethod{ssh.PublicKeys(m.signer)},
-		Timeout: m.timeout,
+		Timeout: m.connTimeout,
 	}
 
 	if m.hostKey != "" {

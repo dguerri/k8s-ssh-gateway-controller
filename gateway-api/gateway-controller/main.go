@@ -12,8 +12,12 @@ import (
 )
 
 func main() {
+	level := slog.LevelInfo
+	if os.Getenv("SLOG_LEVEL") == "DEBUG" {
+		level = slog.LevelDebug
+	}
 	slog.SetDefault(slog.New(
-		slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}),
+		slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}),
 	))
 
 	// configure controller-runtime logging

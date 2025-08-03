@@ -111,6 +111,7 @@ func createSSHManager(ctx context.Context) (*sshmgr.SSHTunnelManager, error) {
 		PrivateKey:        key,
 		HostKey:           sshHostKey,
 		ConnectTimeout:    connectTimeout,
+		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: keepAliveInterval,
 		BackoffInterval:   backoffInterval,
 	}

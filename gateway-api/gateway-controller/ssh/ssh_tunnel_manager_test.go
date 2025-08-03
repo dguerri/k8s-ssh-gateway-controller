@@ -52,6 +52,7 @@ func TestNewSSHTunnelManagerWithInvalidKey(t *testing.T) {
 		Username:          "testuser",
 		HostKey:           "",
 		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
 		BackoffInterval:   2 * time.Second,
 	}
@@ -78,6 +79,7 @@ func TestNewSSHTunnelManager(t *testing.T) {
 		Username:          "testuser",
 		HostKey:           "",
 		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
 		BackoffInterval:   2 * time.Second,
 	}
@@ -104,6 +106,7 @@ func TestForwardingManagement(t *testing.T) {
 		Username:          "testuser",
 		HostKey:           "",
 		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
 		BackoffInterval:   2 * time.Second,
 	}
@@ -164,6 +167,7 @@ func TestKeepAlive(t *testing.T) {
 		Username:          "testuser",
 		HostKey:           "",
 		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 80 * time.Millisecond, // Shorter keep alive for testing
 		BackoffInterval:   2 * time.Second,
 	}
@@ -196,6 +200,7 @@ func TestNewSSHTunnelManagerFailingDialKeepsTrying(t *testing.T) {
 		Username:          "testuser",
 		HostKey:           "",
 		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
 		BackoffInterval:   10 * time.Millisecond, // Quicker re-Dial
 	}
@@ -229,6 +234,7 @@ func TestDuplicateForwarding(t *testing.T) {
 		Username:          "testuser",
 		HostKey:           "",
 		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
 		BackoffInterval:   2 * time.Second,
 	}
@@ -273,6 +279,7 @@ func TestStopForwardingNonExisting(t *testing.T) {
 		Username:          "testuser",
 		HostKey:           "",
 		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
 		BackoffInterval:   2 * time.Second,
 	}
@@ -313,6 +320,7 @@ func TestCloseStopsForwardings(t *testing.T) {
 		Username:          "testuser",
 		HostKey:           "",
 		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
 		BackoffInterval:   2 * time.Second,
 	}

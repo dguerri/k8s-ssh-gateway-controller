@@ -47,7 +47,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	if k8sRoute.DeletionTimestamp.IsZero() {
 		// Add or Update.
-
+		slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Debug("Adding or updating HTTPRoute")
 		// Add a finalizer so we can correctly clean up the route when it's deleted
 		if !containsString(k8sRoute.Finalizers, httpRouteFinalizer) {
 			k8sRoute.Finalizers = append(k8sRoute.Finalizers, httpRouteFinalizer)
@@ -75,6 +75,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Debug("route set successfully")
 	} else {
 		// Handle deletion
+		slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Debug("Deleting HTTPRoute")
 		if containsString(k8sRoute.Finalizers, httpRouteFinalizer) {
 			err := r.GatewayReconciler.RemoveRoute(
 				routeDetails.gwNamespace, routeDetails.gwName,

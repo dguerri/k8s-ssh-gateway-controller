@@ -23,9 +23,9 @@ metadata:
   name: pico-sh-gateway-controller-config
   namespace: ssh-gateway-system
 data:
-  SSH_SERVER: "pico.sh:22"
+  SSH_SERVER: "tuns.sh:22"
   SSH_USERNAME: "tunnel-user"
-  GATEWAY_CONTROLLER_NAME: "tunnels.pico-sh.gateway-api-controller"
+  GATEWAY_CONTROLLER_NAME: "pico.sh/ssh-gateway-api-controller"
 
 ---
 # ServiceAccount used by the SSH Gateway API controller to interact with the Kubernetes API
@@ -81,9 +81,9 @@ roleRef:
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
 metadata:
-  name: ssh-gateway-cl
+  name: pico-sh-gateway-cl
 spec:
-  controllerName: tunnels.ssh.gateway-api-controller
+  controllerName: pico.sh/ssh-gateway-api-controller
 
 ---
 # Deployment of the SSH Gateway API controller
@@ -113,7 +113,7 @@ spec:
         image: <your-registry>/ssh-gateway-api-controller:latest
         envFrom:
         - configMapRef:
-            name: ssh-gateway-controller-config
+            name: pico-sh-gateway-controller-config
         volumeMounts:
         - name: ssh-key
           mountPath: /ssh
