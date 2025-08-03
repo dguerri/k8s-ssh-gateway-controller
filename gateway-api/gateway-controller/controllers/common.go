@@ -7,14 +7,14 @@ import (
 	"strconv"
 	"time"
 
-	sshmgr "github.com/dguerri/pico-sh-gateway-api-controller/ssh"
+	sshmgr "github.com/dguerri/ssh-gateway-api-controller/ssh"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 // Defaults for SSH connection, can be overridden by environment variables
 const defaultKeyPath = "/ssh/id"
-const defaultSSHServer = "tuns.sh:22"
-const defaultSSHUsername = "pico-tunnel"
+const defaultSSHServer = "localhost:22"
+const defaultSSHUsername = "tunnel-user"
 const defaultBackoffInterval = 5 * time.Second
 const defaultKeepAliveInterval = 10 * time.Second
 const defaultConnectTimeout = 5 * time.Second
@@ -25,6 +25,7 @@ var keepAliveInterval = getEnvOrDefault("KEEP_ALIVE_INTERVAL", defaultKeepAliveI
 var connectTimeout = getEnvOrDefault("CONNECT_TIMEOUT", defaultConnectTimeout)
 var sshServer = getEnvOrDefault("SSH_SERVER", defaultSSHServer)
 var sshUsername = getEnvOrDefault("SSH_USERNAME", defaultSSHUsername)
+var sshHostKey = getEnvOrDefault("SSH_HOST_KEY", "")
 
 // Dependency injection for testing purposes
 var osReadFile = os.ReadFile
@@ -108,6 +109,7 @@ func createSSHManager(ctx context.Context) (*sshmgr.SSHTunnelManager, error) {
 		ServerAddress:     sshServer,
 		Username:          sshUsername,
 		PrivateKey:        key,
+		HostKey:           sshHostKey,
 		ConnectTimeout:    connectTimeout,
 		KeepAliveInterval: keepAliveInterval,
 		BackoffInterval:   backoffInterval,

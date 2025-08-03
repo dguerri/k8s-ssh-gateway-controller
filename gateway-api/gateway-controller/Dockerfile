@@ -19,7 +19,7 @@ RUN go build -a -o gateway-controller main.go
 
 # Final Minimal Stage
 FROM gcr.io/distroless/static:nonroot
-LABEL name=pico-sh-gateway-api-controller
+LABEL name=ssh-gateway-api-controller
 LABEL version=1.0
 
 # Set working directory

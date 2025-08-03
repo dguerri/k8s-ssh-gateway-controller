@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
@@ -15,11 +16,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	sshmgr "github.com/dguerri/pico-sh-gateway-api-controller/ssh"
+	sshmgr "github.com/dguerri/ssh-gateway-api-controller/ssh"
 )
 
 const gatewayFinalizer = "gateway.networking.k8s.io/finalizer"
-const picoshGatewayControllerName = "tunnels.pico.sh/gateway-api-gateway-controller"
+
+// Get the controller name from environment variable or use a default
+func getGatewayControllerName() string {
+	if controllerName := os.Getenv("GATEWAY_CONTROLLER_NAME"); controllerName != "" {
+		return controllerName
+	}
+	return "tunnels.ssh.gateway-api-controller"
+}
 
 type Route struct {
 	Name      string
@@ -171,7 +179,8 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	if gc.Spec.ControllerName != picoshGatewayControllerName {
+	controllerName := getGatewayControllerName()
+	if string(gc.Spec.ControllerName) != controllerName {
 		slog.With("function", "Reconcile").Debug("skipping Gateway: does not match controllerName", "gatewayClassName", k8sGw.Spec.GatewayClassName)
 		return ctrl.Result{}, nil
 	}
@@ -322,7 +331,8 @@ func (r *GatewayClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	if gc.Spec.ControllerName != picoshGatewayControllerName {
+	controllerName := getGatewayControllerName()
+	if string(gc.Spec.ControllerName) != controllerName {
 		return ctrl.Result{}, nil
 	}
 

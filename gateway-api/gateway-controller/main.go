@@ -8,7 +8,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	zaplog "sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	"github.com/dguerri/pico-sh-gateway-api-controller/controllers"
+	"github.com/dguerri/ssh-gateway-api-controller/controllers"
 )
 
 func main() {

@@ -1,4 +1,4 @@
-module github.com/dguerri/pico-sh-gateway-api-controller
+module github.com/dguerri/ssh-gateway-api-controller
 
 go 1.24.0
 

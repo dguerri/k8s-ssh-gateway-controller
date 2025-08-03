@@ -1,34 +1,34 @@
-# Namespace for the Pico Gateway API controller and its resources
+# Namespace for the SSH Gateway API controller and its resources
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: pico-sh-system
+  name: ssh-gateway-system
 
 ---
-# Secret containing the SSH private key required by the Pico Gateway API controller
+# Secret containing the SSH private key required by the SSH Gateway API controller
 apiVersion: v1
 kind: Secret
 metadata:
-  name: pico-sh-ssh-key
-  namespace: pico-sh-system
+  name: ssh-gateway-ssh-key
+  namespace: ssh-gateway-system
 type: Opaque
 data:
-  id: <base64-encoded-content-of-your-pico.sh-ssh-key>
+  id: <base64-encoded-content-of-your-ssh-key>
 
 ---
-# ServiceAccount used by the Pico Gateway API controller to interact with the Kubernetes API
+# ServiceAccount used by the SSH Gateway API controller to interact with the Kubernetes API
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: pico-sh-gateway-api-controller-sa
-  namespace: pico-sh-system
+  name: ssh-gateway-api-controller-sa
+  namespace: ssh-gateway-system
 
 ---
 # ClusterRole granting read and patch permissions on HTTPRoute and TCPRoute resources
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: pico-sh-gateway-api-controller-cr
+  name: ssh-gateway-api-controller-cr
 rules:
 - apiGroups: ["gateway.networking.k8s.io"]
   resources: ["gateways"]
@@ -50,18 +50,18 @@ rules:
   verbs: ["update", "patch"]
 
 ---
-# Binds the ClusterRole to the ServiceAccount in the pico-sh-system namespace
+# Binds the ClusterRole to the ServiceAccount in the ssh-gateway-system namespace
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: pico-sh-gateway-api-controller-crb
+  name: ssh-gateway-api-controller-crb
 subjects:
 - kind: ServiceAccount
-  name: pico-sh-gateway-api-controller-sa
-  namespace: pico-sh-system
+  name: ssh-gateway-api-controller-sa
+  namespace: ssh-gateway-system
 roleRef:
   kind: ClusterRole
-  name: pico-sh-gateway-api-controller-cr
+  name: ssh-gateway-api-controller-cr
   apiGroup: rbac.authorization.k8s.io
 
 ---
@@ -69,36 +69,43 @@ roleRef:
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
 metadata:
-  name: pico-sh-gateway-cl
+  name: ssh-gateway-cl
 spec:
-  controllerName: tunnels.pico.sh/gateway-api-gateway-controller
+  controllerName: tunnels.ssh.gateway-api-controller
 
 ---
-# Deployment of the Pico Gateway API controller
+# Deployment of the SSH Gateway API controller
 # Includes environment variables, resource limits, and SSH key mounting
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: pico-sh-gateway-api-controller
-  namespace: pico-sh-system
+  name: ssh-gateway-api-controller
+  namespace: ssh-gateway-system
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: pico-sh-gateway-api-controller
+      app: ssh-gateway-api-controller
   template:
     metadata:
       labels:
-        app: pico-sh-gateway-api-controller
+        app: ssh-gateway-api-controller
     spec:
       securityContext:
         runAsUser: 65532    # nonroot
         runAsGroup: 65532   # nonroot
         fsGroup: 65532      # nonroot
-      serviceAccountName: pico-sh-gateway-api-controller-sa
+      serviceAccountName: ssh-gateway-api-controller-sa
       containers:
       - name: controller
-        image: docker-lab.guerri.me:5001/pico-sh-gateway-api-controller:latest
+        image: <your-registry>/ssh-gateway-api-controller:latest
+        env:
+        - name: SSH_SERVER
+          value: "your-ssh-server:22"
+        - name: SSH_USERNAME
+          value: "your-ssh-username"
+        - name: GATEWAY_CONTROLLER_NAME
+          value: "tunnels.ssh.gateway-api-controller"
         volumeMounts:
         - name: ssh-key
           mountPath: /ssh
@@ -113,5 +120,5 @@ spec:
       volumes:
       - name: ssh-key
         secret:
-          secretName: pico-sh-ssh-key
+          secretName: ssh-gateway-ssh-key
           defaultMode: 256 # 0400 octal 
