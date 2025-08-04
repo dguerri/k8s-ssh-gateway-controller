@@ -68,7 +68,6 @@ type SSHTunnelManager struct {
 	connected         bool
 	clientMu          sync.RWMutex
 	client            sshClient
-	forwardingsMu     sync.Mutex
 	forwardings       map[string]*ForwardingConfig
 }
 
@@ -115,7 +114,10 @@ func (m *SSHTunnelManager) WaitConnection() error {
 			return fmt.Errorf("ssh connection cancelled: %w", m.externalCtx.Err())
 		default:
 		}
-		if m.connected {
+		m.clientMu.RLock()
+		connected := m.connected
+		m.clientMu.RUnlock()
+		if connected {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -127,26 +129,25 @@ func (m *SSHTunnelManager) WaitConnection() error {
 // handleConnection manages the SSH connection lifecycle and reconnections. Blocks until externalCtx is done.
 func (m *SSHTunnelManager) handleConnection() {
 	for {
+		select {
+		case <-m.externalCtx.Done():
+			m.clientMu.Lock()
+			m.closeClient()
+			m.clientMu.Unlock()
+			return
+		default:
+		}
+
 		m.clientMu.Lock()
 		err := m.connectClient()
-		m.clientMu.Unlock()
 		if err != nil {
+			m.clientMu.Unlock()
 			slog.With("function", "handleConnection").Error("ssh connection failed", "error", err)
 			time.Sleep(m.backoffInterval)
 			continue
 		}
 		slog.With("function", "handleConnection").Debug("ssh connection established")
 
-		select {
-		case <-m.externalCtx.Done():
-			m.clientMu.Lock()
-			defer m.clientMu.Unlock()
-			m.closeClient()
-			return
-		default:
-		}
-
-		m.forwardingsMu.Lock()
 		// Restart existing forwardings, in case of reconnection
 		for key, forwardingSession := range m.forwardings {
 			slog.With("function", "handleConnection").Debug("restarting forwarding", "key", key)
@@ -157,10 +158,11 @@ func (m *SSHTunnelManager) handleConnection() {
 				continue
 			}
 		}
-		m.forwardingsMu.Unlock()
 
 		// Handle incoming channels
 		go m.handleChannels()
+
+		m.clientMu.Unlock()
 
 		// Monitor connection (keepalive and disconnect detection)
 		m.monitorConnection()
@@ -182,11 +184,20 @@ func (m *SSHTunnelManager) monitorConnection() {
 		case <-m.externalCtx.Done():
 			return
 		case <-ticker.C:
-			if m.connectionCtx.Err() != nil {
+			m.clientMu.RLock()
+			if m.connectionCtx == nil || m.connectionCtx.Err() != nil {
+				m.clientMu.RUnlock()
 				slog.With("function", "monitorConnection").Debug("ssh connection context cancelled")
 				return
 			}
-			if _, _, err := m.client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+			if m.client == nil {
+				m.clientMu.RUnlock()
+				slog.With("function", "monitorConnection").Error("ssh client is nil, reconnecting")
+				return
+			}
+			_, _, err := m.client.SendRequest("keepalive@openssh.com", true, nil)
+			m.clientMu.RUnlock()
+			if err != nil {
 				slog.With("function", "monitorConnection").Error("ssh keepalive failed, reconnecting", "error", err)
 				return
 			}
@@ -196,6 +207,7 @@ func (m *SSHTunnelManager) monitorConnection() {
 }
 
 // closeClient closes the current SSH client connection.
+// Must be called with a write lock on m.clientMu
 func (m *SSHTunnelManager) closeClient() {
 	m.connected = false
 
@@ -223,10 +235,10 @@ type forwardedTCPPayload struct {
 
 // StartForwarding starts a new forwarding based on the provided configuration.
 func (m *SSHTunnelManager) StartForwarding(fwd ForwardingConfig) error {
-	m.forwardingsMu.Lock()
-	defer m.forwardingsMu.Unlock()
+	m.clientMu.Lock()
+	defer m.clientMu.Unlock()
 
-	if !m.connected {
+	if !m.connected || m.client == nil {
 		slog.With("function", "StartForwarding").Warn("client not ready")
 		return &ErrSSHClientNotReady{}
 	}
@@ -254,6 +266,7 @@ func (m *SSHTunnelManager) StartForwarding(fwd ForwardingConfig) error {
 
 // sendForwardingRequest sends a request to the SSH server to set up a TCP forwarding.
 // It returns an error if the request fails or is denied by the server.
+// Must be called with a lock on m.clientMu
 func (m *SSHTunnelManager) sendForwardingRequest(fwd *ForwardingConfig) error {
 	forwardMessage := channelForwardMsg{
 		addr:  fwd.RemoteHost,
@@ -293,10 +306,10 @@ func (m *SSHTunnelManager) sendForwardingRequest(fwd *ForwardingConfig) error {
 
 // StopForwarding stops an existing forwarding based on the provided configuration.
 func (m *SSHTunnelManager) StopForwarding(fwd *ForwardingConfig) error {
-	m.forwardingsMu.Lock()
-	defer m.forwardingsMu.Unlock()
+	m.clientMu.Lock()
+	defer m.clientMu.Unlock()
 
-	if !m.connected {
+	if !m.connected || m.client == nil {
 		return &ErrSSHClientNotReady{}
 	}
 	key := forwardingKey(fwd.RemoteHost, fwd.RemotePort)
@@ -321,6 +334,8 @@ func (m *SSHTunnelManager) StopForwarding(fwd *ForwardingConfig) error {
 	return nil
 }
 
+// sendForwardingCancel sends a request to the SSH server to cancel a TCP forwarding.
+// Must be called with a lock on m.clientMu
 func (m *SSHTunnelManager) sendForwardingCancel(fwd *ForwardingConfig) error {
 	forwardMessage := channelForwardMsg{
 		addr:  fwd.RemoteHost,
@@ -340,13 +355,22 @@ func (m *SSHTunnelManager) sendForwardingCancel(fwd *ForwardingConfig) error {
 	return nil
 }
 
-// handleForwarding manages the lifecycle of a forwarding sessions
+// handleChannels manages the lifecycle of a forwarding sessions
 func (m *SSHTunnelManager) handleChannels() {
+	m.clientMu.RLock()
+	if m.client == nil {
+		m.clientMu.RUnlock()
+		slog.With("function", "handleChannels").Error("client is nil, cannot handle channels")
+		return
+	}
 	tcpipChan := m.client.HandleChannelOpen("forwarded-tcpip")
+	connectionCtx := m.connectionCtx
+	m.clientMu.RUnlock()
+
 	for {
 		slog.Debug("waiting for new channels")
 		select {
-		case <-m.connectionCtx.Done():
+		case <-connectionCtx.Done():
 			slog.With("function", "handleChannels").Debug("connection context cancelled, stopping channel handling")
 			return
 		case ch := <-tcpipChan:
@@ -371,9 +395,9 @@ func (m *SSHTunnelManager) handleChannels() {
 				logger.Debug("forwarded-tcpip channel opened", "remote_addr", payload.Addr, "remote_port", payload.Port, "origin_addr", payload.OriginAddr, "origin_port", payload.OriginPort)
 
 				key := forwardingKey(payload.Addr, int(payload.Port))
-				m.forwardingsMu.Lock()
+				m.clientMu.RLock()
 				fwd, exists := m.forwardings[key]
-				m.forwardingsMu.Unlock()
+				m.clientMu.RUnlock()
 				if exists {
 					go func(ch ssh.NewChannel) {
 						remoteConn, reqs, acceptErr := ch.Accept()
@@ -431,7 +455,7 @@ func (m *SSHTunnelManager) handleChannels() {
 }
 
 // connectClient establishes a new SSH client connection.
-// Must be called with a lock on m.clientMu
+// Must be called with a write lock on m.clientMu
 func (m *SSHTunnelManager) connectClient() error {
 	config := &ssh.ClientConfig{
 		User:    m.sshUser,
@@ -469,15 +493,19 @@ func (m *SSHTunnelManager) connectClient() error {
 	return nil
 }
 
+// Stop gracefully shuts down the SSHTunnelManager.
 func (m *SSHTunnelManager) Stop() {
-	m.forwardingsMu.Lock()
-	defer m.forwardingsMu.Unlock()
 	m.clientMu.Lock()
 	defer m.clientMu.Unlock()
 
-	for _, forwardingSession := range m.forwardings {
-		m.sendForwardingCancel(forwardingSession)
-		slog.With("function", "Stop").Info("stopped forwarding", "key", forwardingSession)
+	if m.client != nil && m.connected {
+		for key, forwardingSession := range m.forwardings {
+			if err := m.sendForwardingCancel(forwardingSession); err != nil {
+				slog.With("function", "Stop").Error("failed to stop forwarding", "key", key, "error", err)
+			} else {
+				slog.With("function", "Stop").Info("stopped forwarding", "key", key)
+			}
+		}
 	}
 	m.forwardings = make(map[string]*ForwardingConfig) // Clear forwardings map
 
