@@ -45,7 +45,7 @@ kind: Gateway
 metadata:
   name: tcp-echo-gateway
 spec:
-  gatewayClassName: ssh-gateway-cl
+  gatewayClassName: pico-sh-gateway-cl
   listeners:
   - name: tcp-gw
     protocol: TCP
