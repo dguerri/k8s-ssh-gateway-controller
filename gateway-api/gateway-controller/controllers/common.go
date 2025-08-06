@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -114,6 +115,7 @@ func createSSHManager(ctx context.Context) (*sshmgr.SSHTunnelManager, error) {
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: keepAliveInterval,
 		BackoffInterval:   backoffInterval,
+		RemoteAddrFunc:    getRemoteAddress,
 	}
 
 	return sshmgr.NewSSHTunnelManager(ctx, &sshConfig)
@@ -121,4 +123,34 @@ func createSSHManager(ctx context.Context) (*sshmgr.SSHTunnelManager, error) {
 
 func getSvcHostname(svcName, svcNamespace string) string {
 	return fmt.Sprintf("%s.%s.svc.cluster.local", svcName, svcNamespace)
+}
+
+// getRemoteAddress extracts remote addresses from the input string using regex.
+// Pico.sh TCP and HTTP(S) URIs are supported.
+func getRemoteAddress(input string) ([]string, error) {
+	var results []string
+
+	patterns := map[string][]string{
+		"tcp":   {`TCP\x1b\[0m:\s+([\w\.-]+:\d+)\r`},
+		"http":  {`HTTP\x1b\[0m:\s+(http://[\w\.-]+)\r`},
+		"https": {`HTTPS\x1b\[0m:\s+(https://[\w\.-]+)\r`},
+	}
+
+	for scheme, pats := range patterns {
+		for _, pattern := range pats {
+			re := regexp.MustCompile(pattern)
+			matches := re.FindAllStringSubmatch(input, -1)
+			for _, match := range matches {
+				if len(match) > 1 {
+					if scheme == "tcp" {
+						results = append(results, "tcp://"+match[1])
+					} else {
+						results = append(results, match[1])
+					}
+				}
+			}
+		}
+	}
+
+	return results, nil
 }

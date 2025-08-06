@@ -32,6 +32,10 @@ var netDial = func(network string, address string) (net.Conn, error) {
 	return net.Dial(network, address)
 }
 
+// ExtractAddrFunc is a function type used to pass a callback that takes text
+// returned to ssh server and returns a string containing a uri.
+type ExtractAddrFunc func(string) ([]string, error)
+
 // SSHConnectionConfig contains configuration for SSH connection.
 type SSHConnectionConfig struct {
 	PrivateKey        []byte
@@ -42,6 +46,7 @@ type SSHConnectionConfig struct {
 	FwdReqTimeout     time.Duration
 	KeepAliveInterval time.Duration
 	BackoffInterval   time.Duration
+	RemoteAddrFunc    ExtractAddrFunc
 }
 
 // ForwardingConfig defines configuration for a single forwarding.
@@ -68,6 +73,7 @@ type SSHTunnelManager struct {
 	connected         bool
 	clientMu          sync.RWMutex
 	client            sshClient
+	remoteAddrFunc    ExtractAddrFunc
 	forwardings       map[string]*ForwardingConfig
 }
 
@@ -96,6 +102,7 @@ func NewSSHTunnelManager(externalCtx context.Context, config *SSHConnectionConfi
 		backoffInterval:   config.BackoffInterval,
 		externalCtx:       externalCtx,
 		connected:         false,
+		remoteAddrFunc:    config.RemoteAddrFunc,
 		forwardings:       make(map[string]*ForwardingConfig),
 	}
 	go m.handleConnection()
@@ -502,6 +509,13 @@ func (m *SSHTunnelManager) connectClient() error {
 	m.connected = true
 	m.connectionCtx, m.connectionCancel = context.WithCancel(m.externalCtx)
 
+	if m.remoteAddrFunc == nil {
+		slog.With("function", "connect").Debug("remoteAddrFunc is not set, skipping server output capture")
+	} else {
+		slog.With("function", "connect").Debug("remoteAddrFunc is set, capturing server output")
+		go m.captureServerOutput()
+	}
+
 	return nil
 }
 
@@ -524,4 +538,63 @@ func (m *SSHTunnelManager) Stop() {
 	m.closeClient()
 
 	slog.Info("ssh tunnel manager stopped, all forwardings and connections closed")
+}
+
+// captureServerOutput captures the output from the SSH server and processes it using the remoteAddrFunc.
+// It reads from the server's stdout and applies the remoteAddrFunc to extract URIs from the output.
+// This function runs in a goroutine and will stop when the connection context is done.
+func (m *SSHTunnelManager) captureServerOutput() {
+	realClient, ok := m.client.(*ssh.Client)
+	if !ok {
+		slog.With("function", "captureServerOutput").Warn("cannot capture server output, client is not *ssh.Client")
+		return
+	}
+
+	session, err := realClient.NewSession()
+	if err != nil {
+		slog.With("function", "captureServerOutput").Error("failed to create SSH session", "error", err)
+		return
+	}
+	defer session.Close()
+
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		slog.With("function", "captureServerOutput").Error("failed to get stdout pipe", "error", err)
+		return
+	}
+
+	if err := session.Shell(); err != nil {
+		slog.With("function", "captureServerOutput").Error("failed to start remote session", "error", err)
+		return
+	}
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := stdout.Read(buf)
+			if err != nil {
+				if err != io.EOF {
+					slog.With("function", "captureServerOutput", "stream", "stdout").Error("read error", "error", err)
+				}
+				break
+			}
+			if n > 0 {
+				data := string(buf[:n])
+				slog.With("function", "captureServerOutput", "stream", "stdout").Debug(data)
+
+				uris, err := m.remoteAddrFunc(data)
+				if err != nil {
+					slog.With("function", "captureServerOutput", "stream", "stdout").Error("failed to extract URIs from data", "error", err)
+					continue
+				}
+				slog.With("function", "captureServerOutput", "stream", "stdout").Debug("extracted URIs from server output", "uris_count", len(uris))
+				for _, uri := range uris {
+					slog.With("function", "captureServerOutput", "stream", "stdout").Info("extracted URI from server output", "uri", uri)
+				}
+			}
+		}
+	}()
+
+	<-m.connectionCtx.Done()
+	session.Close()
 }

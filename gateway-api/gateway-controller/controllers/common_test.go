@@ -195,3 +195,38 @@ func TestCreateSSHManager_InvalidKey(t *testing.T) {
 	assert.Error(t, err, "Expected error when creating SSH manager with invalid key")
 	assert.Nil(t, manager, "Expected SSH manager to be nil")
 }
+
+func TestGetRemoteAddress(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{
+			name:     "Single TCP address",
+			input:    "Starting SSH Forwarding service for \x1b[32mtcp:59123\x1b[0m. Forwarded connections can be accessed via the following methods:\r\n\x1b[44mTCP\x1b[0m: nue.tuns.sh:59123\r\n\r\n",
+			expected: []string{"tcp://nue.tuns.sh:59123"},
+		},
+		{
+			name:  "Multiple addresses of different types",
+			input: "Starting SSH Forwarding service for \x1b[32mhttp:80\x1b[0m. Forwarded connections can be accessed via the following methods:\r\nService console can be accessed here: https://my-web-test.nue.tuns.sh/_sish/console?x-authorization=AKLjhgIOxLJTePkT1piV\r\n\x1b[44mHTTP\x1b[0m: http://my-web-test.nue.tuns.sh\r\n\x1b[44mHTTPS\x1b[0m: https://my-web-test.nue.tuns.sh\r\n\r\n",
+			expected: []string{
+				"http://my-web-test.nue.tuns.sh",
+				"https://my-web-test.nue.tuns.sh",
+			},
+		},
+		{
+			name:     "No match",
+			input:    "No matching address",
+			expected: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := getRemoteAddress(tt.input)
+			assert.NoError(t, err)
+			assert.ElementsMatch(t, tt.expected, result)
+		})
+	}
+}
