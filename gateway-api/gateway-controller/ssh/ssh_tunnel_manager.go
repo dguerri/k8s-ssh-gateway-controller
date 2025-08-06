@@ -383,11 +383,13 @@ func (m *SSHTunnelManager) handleChannels() {
 				slog.String("channel_type", ch.ChannelType()),
 				slog.String("extra_data", string(ch.ExtraData())),
 			)
+			logger.Debug("received new channel from SSH server")
+
 			switch channelType := ch.ChannelType(); channelType {
 			case "forwarded-tcpip":
 				var payload forwardedTCPPayload
 				if err := ssh.Unmarshal(ch.ExtraData(), &payload); err != nil {
-					logger.Error("Unable to parse forwarded-tcpip payload", slog.Any("error", err))
+					logger.Error("unable to parse forwarded-tcpip payload", slog.Any("error", err))
 					ch.Reject(ssh.ConnectionFailed, "could not parse forwarded-tcpip payload: "+err.Error())
 					continue
 				}
@@ -407,8 +409,15 @@ func (m *SSHTunnelManager) handleChannels() {
 						}
 						logger.Debug("channel accepted")
 
-						// Avoid resource leak by discarding requests
-						go ssh.DiscardRequests(reqs)
+						// Log all requests sent by the SSH server on this channel, and discard them.
+						go func() {
+							for req := range reqs {
+								logger.Debug("received request on channel", "request_type", req.Type, "want_reply", req.WantReply, "payload", string(req.Payload))
+								if req.WantReply {
+									req.Reply(false, nil)
+								}
+							}
+						}()
 
 						go func() {
 							defer remoteConn.Close()
@@ -427,21 +436,21 @@ func (m *SSHTunnelManager) handleChannels() {
 							go func() {
 								defer wg.Done()
 								n, err := io.Copy(remoteConn, localConn)
-								slog.With("function", "HandleChannels").Debug("copied data from local to remote", "bytes", n, "error", err)
+								slog.With("function", "handleChannels").Debug("copied data from local to remote", "bytes", n, "error", err)
 								remoteConn.CloseWrite()
 							}()
 
 							go func() {
 								defer wg.Done()
 								n, err := io.Copy(localConn, remoteConn)
-								slog.With("function", "HandleChannels").Debug("copied data from remote to local", "bytes", n, "error", err)
+								slog.With("function", "handleChannels").Debug("copied data from remote to local", "bytes", n, "error", err)
 								if cw, ok := localConn.(interface{ CloseWrite() error }); ok {
 									cw.CloseWrite()
 								}
 							}()
 
 							wg.Wait()
-							slog.With("function", "HandleChannels").Debug("channel closed")
+							slog.With("function", "handleChannels").Debug("channel closed")
 						}()
 					}(ch)
 					logger.Debug("forwarding established", "key", key)
@@ -449,6 +458,9 @@ func (m *SSHTunnelManager) handleChannels() {
 					logger.Warn("unable to find forwarding session")
 					ch.Reject(ssh.ConnectionFailed, "unable to find forwarding session")
 				}
+			default:
+				logger.Warn("unknown channel type received", "channel_type", channelType)
+				ch.Reject(ssh.UnknownChannelType, "unknown channel type")
 			}
 		}
 	}
