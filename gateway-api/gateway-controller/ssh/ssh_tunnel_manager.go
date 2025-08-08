@@ -158,7 +158,7 @@ func (m *SSHTunnelManager) handleConnection() {
 		// Restart existing forwardings, in case of reconnection
 		for key, forwardingSession := range m.forwardings {
 			slog.With("function", "handleConnection").Debug("restarting forwarding", "key", key)
-			err := m.sendForwardingRequest(forwardingSession)
+			err := m.sendForwarding(forwardingSession, ForwardStart)
 			if err != nil {
 				slog.With("function", "handleConnection").Error("failed to send forwarding request, removing forwarding", "error", err, "key", key)
 				delete(m.forwardings, key)
@@ -257,7 +257,7 @@ func (m *SSHTunnelManager) StartForwarding(fwd ForwardingConfig) error {
 		return err
 	}
 
-	err := m.sendForwardingRequest(&fwd)
+	err := m.sendForwarding(&fwd, ForwardStart)
 	if err != nil {
 		slog.With("function", "StartForwarding").Error("failed to send forwarding request", "error", err)
 		return err
@@ -269,46 +269,6 @@ func (m *SSHTunnelManager) StartForwarding(fwd ForwardingConfig) error {
 	slog.With("function", "StartForwarding").Info("started forwarding", "key", key)
 
 	return nil
-}
-
-// sendForwardingRequest sends a request to the SSH server to set up a TCP forwarding.
-// It returns an error if the request fails or is denied by the server.
-// Must be called with a lock on m.clientMu
-func (m *SSHTunnelManager) sendForwardingRequest(fwd *ForwardingConfig) error {
-	forwardMessage := channelForwardMsg{
-		addr:  fwd.RemoteHost,
-		rport: uint32(fwd.RemotePort),
-	}
-
-	result := make(chan struct {
-		ok  bool
-		err error
-	}, 1)
-
-	go func() {
-		ok, _, err := m.client.SendRequest("tcpip-forward", true, ssh.Marshal(&forwardMessage))
-		result <- struct {
-			ok  bool
-			err error
-		}{ok, err}
-	}()
-
-	select {
-	case res := <-result:
-		if res.err != nil {
-			slog.With("function", "sendForwardingRequest").Error("tcpip-forward request failed", "error", res.err)
-			return res.err
-		}
-		if !res.ok {
-			slog.With("function", "sendForwardingRequest").Error("tcpip-forward request denied by server")
-			return fmt.Errorf("ssh: tcpip-forward request denied by server")
-		}
-		slog.With("function", "sendForwardingRequest").Debug("tcpip-forward request accepted", "remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
-		return nil
-	case <-time.After(m.fwdReqTimeout):
-		slog.With("function", "sendForwardingRequest").Error("tcpip-forward request timed out")
-		return fmt.Errorf("ssh: tcpip-forward request timed out")
-	}
 }
 
 // StopForwarding stops an existing forwarding based on the provided configuration.
@@ -330,7 +290,7 @@ func (m *SSHTunnelManager) StopForwarding(fwd *ForwardingConfig) error {
 	// Cancel forwarding may still fail, but we should remove the forwardingSession anyway.
 	delete(m.forwardings, key)
 
-	err := m.sendForwardingCancel(forwardingSession)
+	err := m.sendForwarding(forwardingSession, ForwardCancel)
 	if err != nil {
 		slog.With("function", "StopForwarding").Error("failed to send cancel request", "error", err)
 		return err
@@ -341,25 +301,88 @@ func (m *SSHTunnelManager) StopForwarding(fwd *ForwardingConfig) error {
 	return nil
 }
 
-// sendForwardingCancel sends a request to the SSH server to cancel a TCP forwarding.
+// ForwardRequest is the type of forwarding request to send.
+type ForwardRequest string
+
+const (
+	ForwardStart  ForwardRequest = "start"
+	ForwardCancel ForwardRequest = "cancel"
+)
+
+// sendForwarding sends a request to the SSH server to start or cancel a TCP forwarding.
+// 'req' controls the request: ForwardStart -> "tcpip-forward", ForwardCancel -> "cancel-tcpip-forward".
+// It returns an error if the request fails or is denied by the server.
 // Must be called with a lock on m.clientMu
-func (m *SSHTunnelManager) sendForwardingCancel(fwd *ForwardingConfig) error {
+func (m *SSHTunnelManager) sendForwarding(fwd *ForwardingConfig, req ForwardRequest) error {
 	forwardMessage := channelForwardMsg{
 		addr:  fwd.RemoteHost,
 		rport: uint32(fwd.RemotePort),
 	}
 
-	ok, _, err := m.client.SendRequest("cancel-tcpip-forward", true, ssh.Marshal(&forwardMessage))
-	if err != nil {
-		slog.With("function", "StopForwarding").Error("cancel request failed", "error", err)
-		return err
-	}
-	if !ok {
-		slog.With("function", "StopForwarding").Error("request to cancel rejected by peer")
-		return fmt.Errorf("ssh: cancel-tcpip-forward request denied by peer")
+	ctx, cancel := context.WithTimeout(context.Background(), m.fwdReqTimeout)
+	defer cancel()
+
+	var reqType string
+	switch req {
+	case ForwardStart:
+		reqType = "tcpip-forward"
+	case ForwardCancel:
+		reqType = "cancel-tcpip-forward"
+	default:
+		return fmt.Errorf("ssh: unknown forwarding request type: %q", req)
 	}
 
-	return nil
+	resCh := make(chan struct {
+		ok  bool
+		err error
+	})
+
+	go func() {
+		ok, _, err := m.client.SendRequest(reqType, true, ssh.Marshal(&forwardMessage))
+		select {
+		case resCh <- struct {
+			ok  bool
+			err error
+		}{ok, err}:
+		case <-ctx.Done():
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("ssh: %s request timed out", reqType)
+	case res := <-resCh:
+		if res.err != nil {
+			return res.err
+		}
+		if !res.ok {
+			return fmt.Errorf("ssh: %s request denied by server", reqType)
+		}
+		slog.With("function", "sendForwarding").Debug("request accepted",
+			"request", reqType, "remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
+		return nil
+	}
+}
+
+// Stop gracefully shuts down the SSHTunnelManager.
+func (m *SSHTunnelManager) Stop() {
+	m.clientMu.Lock()
+	defer m.clientMu.Unlock()
+
+	if m.client != nil && m.connected {
+		for key, forwardingSession := range m.forwardings {
+			if err := m.sendForwarding(forwardingSession, ForwardCancel); err != nil {
+				slog.With("function", "Stop").Error("failed to stop forwarding", "key", key, "error", err)
+			} else {
+				slog.With("function", "Stop").Info("stopped forwarding", "key", key)
+			}
+		}
+	}
+	m.forwardings = make(map[string]*ForwardingConfig) // Clear forwardings map
+
+	m.closeClient()
+
+	slog.Info("ssh tunnel manager stopped, all forwardings and connections closed")
 }
 
 // handleChannels manages the lifecycle of a forwarding sessions
@@ -517,27 +540,6 @@ func (m *SSHTunnelManager) connectClient() error {
 	}
 
 	return nil
-}
-
-// Stop gracefully shuts down the SSHTunnelManager.
-func (m *SSHTunnelManager) Stop() {
-	m.clientMu.Lock()
-	defer m.clientMu.Unlock()
-
-	if m.client != nil && m.connected {
-		for key, forwardingSession := range m.forwardings {
-			if err := m.sendForwardingCancel(forwardingSession); err != nil {
-				slog.With("function", "Stop").Error("failed to stop forwarding", "key", key, "error", err)
-			} else {
-				slog.With("function", "Stop").Info("stopped forwarding", "key", key)
-			}
-		}
-	}
-	m.forwardings = make(map[string]*ForwardingConfig) // Clear forwardings map
-
-	m.closeClient()
-
-	slog.Info("ssh tunnel manager stopped, all forwardings and connections closed")
 }
 
 // captureServerOutput captures the output from the SSH server and processes it using the remoteAddrFunc.
