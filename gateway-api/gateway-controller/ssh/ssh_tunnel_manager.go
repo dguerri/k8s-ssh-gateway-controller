@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -452,7 +453,8 @@ func (m *SSHTunnelManager) handleChannels() {
 						go func() {
 							defer remoteConn.Close()
 
-							localConn, localErr := netDial("tcp", fwd.InternalHost+":"+fmt.Sprint(fwd.InternalPort))
+							addr := net.JoinHostPort(fwd.InternalHost, strconv.Itoa(fwd.InternalPort))
+							localConn, localErr := netDial("tcp", addr)
 							if localErr != nil {
 								logger.Error("failed to connect to local address", "error", localErr)
 								return
