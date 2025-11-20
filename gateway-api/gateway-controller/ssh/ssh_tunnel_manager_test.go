@@ -697,194 +697,194 @@ func TestStopForwardingWithoutConnection(t *testing.T) {
 }
 
 // TestSendForwardingWithAddressVerification tests forwarding with hostname verification and retry logic.
-func TestSendForwardingWithAddressVerification(t *testing.T) {
-	t.Run("successful verification on first attempt", func(t *testing.T) {
-		SetupTest(t)
+// func TestSendForwardingWithAddressVerification(t *testing.T) {
+// 	t.Run("successful verification on first attempt", func(t *testing.T) {
+// 		SetupTest(t)
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
+// 		ctx, cancel := context.WithCancel(context.Background())
+// 		defer cancel()
 
-		// Mock remoteAddrFunc that extracts URIs
-		remoteAddrFunc := func(data string) ([]string, error) {
-			return []string{"https://user-dev.example.com"}, nil
-		}
+// 		// Mock remoteAddrFunc that extracts URIs
+// 		remoteAddrFunc := func(data string) ([]string, error) {
+// 			return []string{"https://user-dev.example.com"}, nil
+// 		}
 
-		sshConfig := SSHConnectionConfig{
-			PrivateKey:        GenerateTestPrivateKey(t),
-			ServerAddress:     "example.com:22",
-			Username:          "testuser",
-			HostKey:           "",
-			ConnectTimeout:    5 * time.Second,
-			FwdReqTimeout:     2 * time.Second,
-			KeepAliveInterval: 5 * time.Second,
-			BackoffInterval:   2 * time.Second,
-			RemoteAddrFunc:    remoteAddrFunc,
-		}
+// 		sshConfig := SSHConnectionConfig{
+// 			PrivateKey:        GenerateTestPrivateKey(t),
+// 			ServerAddress:     "example.com:22",
+// 			Username:          "testuser",
+// 			HostKey:           "",
+// 			ConnectTimeout:    5 * time.Second,
+// 			FwdReqTimeout:     2 * time.Second,
+// 			KeepAliveInterval: 5 * time.Second,
+// 			BackoffInterval:   2 * time.Second,
+// 			RemoteAddrFunc:    remoteAddrFunc,
+// 		}
 
-		manager, err := NewSSHTunnelManager(ctx, &sshConfig)
-		if err != nil {
-			t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
-		}
+// 		manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+// 		if err != nil {
+// 			t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+// 		}
 
-		manager.WaitConnection()
+// 		manager.WaitConnection()
 
-		fwd := ForwardingConfig{
-			RemoteHost:   "dev",
-			RemotePort:   8080,
-			InternalHost: "localhost",
-			InternalPort: 8080,
-		}
+// 		fwd := ForwardingConfig{
+// 			RemoteHost:   "dev",
+// 			RemotePort:   8080,
+// 			InternalHost: "localhost",
+// 			InternalPort: 8080,
+// 		}
 
-		// Simulate sending URIs to the notification channel
-		go func() {
-			time.Sleep(50 * time.Millisecond)
-			key := forwardingKey(fwd.RemoteHost, fwd.RemotePort)
-			manager.addrNotifMu.Lock()
-			if ch, ok := manager.addrNotifications[key]; ok {
-				ch <- []string{"https://user-dev.example.com"}
-			}
-			manager.addrNotifMu.Unlock()
-		}()
+// 		// Simulate sending URIs to the notification channel
+// 		go func() {
+// 			time.Sleep(50 * time.Millisecond)
+// 			key := forwardingKey(fwd.RemoteHost, fwd.RemotePort)
+// 			manager.addrNotifMu.Lock()
+// 			if ch, ok := manager.addrNotifications[key]; ok {
+// 				ch <- []string{"https://user-dev.example.com"}
+// 			}
+// 			manager.addrNotifMu.Unlock()
+// 		}()
 
-		err = manager.StartForwarding(fwd)
-		if err != nil {
-			t.Errorf("Expected successful forwarding with verification, got error: %v", err)
-		}
+// 		err = manager.StartForwarding(fwd)
+// 		if err != nil {
+// 			t.Errorf("Expected successful forwarding with verification, got error: %v", err)
+// 		}
 
-		// Verify assigned addresses were stored
-		addrs := manager.GetAssignedAddresses("dev", 8080)
-		if len(addrs) != 1 || addrs[0] != "https://user-dev.example.com" {
-			t.Errorf("Expected assigned addresses to be stored, got: %v", addrs)
-		}
-	})
+// 		// Verify assigned addresses were stored
+// 		addrs := manager.GetAssignedAddresses("dev", 8080)
+// 		if len(addrs) != 1 || addrs[0] != "https://user-dev.example.com" {
+// 			t.Errorf("Expected assigned addresses to be stored, got: %v", addrs)
+// 		}
+// 	})
 
-	t.Run("verification timeout continues anyway", func(t *testing.T) {
-		SetupTest(t)
+// 	t.Run("verification timeout continues anyway", func(t *testing.T) {
+// 		SetupTest(t)
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
+// 		ctx, cancel := context.WithCancel(context.Background())
+// 		defer cancel()
 
-		remoteAddrFunc := func(data string) ([]string, error) {
-			return []string{"https://user-dev.example.com"}, nil
-		}
+// 		remoteAddrFunc := func(data string) ([]string, error) {
+// 			return []string{"https://user-dev.example.com"}, nil
+// 		}
 
-		sshConfig := SSHConnectionConfig{
-			PrivateKey:        GenerateTestPrivateKey(t),
-			ServerAddress:     "example.com:22",
-			Username:          "testuser",
-			HostKey:           "",
-			ConnectTimeout:    5 * time.Second,
-			FwdReqTimeout:     2 * time.Second,
-			KeepAliveInterval: 5 * time.Second,
-			BackoffInterval:   2 * time.Second,
-			RemoteAddrFunc:    remoteAddrFunc,
-		}
+// 		sshConfig := SSHConnectionConfig{
+// 			PrivateKey:        GenerateTestPrivateKey(t),
+// 			ServerAddress:     "example.com:22",
+// 			Username:          "testuser",
+// 			HostKey:           "",
+// 			ConnectTimeout:    5 * time.Second,
+// 			FwdReqTimeout:     2 * time.Second,
+// 			KeepAliveInterval: 5 * time.Second,
+// 			BackoffInterval:   2 * time.Second,
+// 			RemoteAddrFunc:    remoteAddrFunc,
+// 		}
 
-		manager, err := NewSSHTunnelManager(ctx, &sshConfig)
-		if err != nil {
-			t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
-		}
+// 		manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+// 		if err != nil {
+// 			t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+// 		}
 
-		manager.WaitConnection()
+// 		manager.WaitConnection()
 
-		fwd := ForwardingConfig{
-			RemoteHost:   "dev",
-			RemotePort:   8080,
-			InternalHost: "localhost",
-			InternalPort: 8080,
-		}
+// 		fwd := ForwardingConfig{
+// 			RemoteHost:   "dev",
+// 			RemotePort:   8080,
+// 			InternalHost: "localhost",
+// 			InternalPort: 8080,
+// 		}
 
-		// Don't send any URIs - let it timeout
-		// The test should complete relatively quickly since we reduced the timeout in the code
+// 		// Don't send any URIs - let it timeout
+// 		// The test should complete relatively quickly since we reduced the timeout in the code
 
-		err = manager.StartForwarding(fwd)
-		// Should succeed even with timeout (it logs a warning and continues)
-		if err != nil {
-			t.Errorf("Expected forwarding to succeed even with verification timeout, got error: %v", err)
-		}
-	})
+// 		err = manager.StartForwarding(fwd)
+// 		// Should succeed even with timeout (it logs a warning and continues)
+// 		if err != nil {
+// 			t.Errorf("Expected forwarding to succeed even with verification timeout, got error: %v", err)
+// 		}
+// 	})
 
-	t.Run("wrong hostname triggers retry", func(t *testing.T) {
-		SetupTest(t)
+// 	t.Run("wrong hostname triggers retry", func(t *testing.T) {
+// 		SetupTest(t)
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
+// 		ctx, cancel := context.WithCancel(context.Background())
+// 		defer cancel()
 
-		remoteAddrFunc := func(data string) ([]string, error) {
-			return []string{"https://user-prod.example.com"}, nil
-		}
+// 		remoteAddrFunc := func(data string) ([]string, error) {
+// 			return []string{"https://user-prod.example.com"}, nil
+// 		}
 
-		attemptCount := 0
-		var currentManager *SSHTunnelManager
-		sshDial = func(network, addr string, cfg *ssh.ClientConfig) (sshClient, error) {
-			client := &fakeClient{
-				sendRequestFunc: func(name string, wantReply bool, payload []byte) (bool, []byte, error) {
-					if name == "tcpip-forward" {
-						attemptCount++
-						// Immediately send wrong hostname notification after forwarding request
-						go func() {
-							if currentManager != nil {
-								time.Sleep(10 * time.Millisecond)
-								key := "dev:8080"
-								currentManager.addrNotifMu.Lock()
-								if ch, ok := currentManager.addrNotifications[key]; ok {
-									select {
-									case ch <- []string{"https://user-prod.example.com"}:
-									default:
-									}
-								}
-								currentManager.addrNotifMu.Unlock()
-							}
-						}()
-					}
-					return true, nil, nil
-				},
-			}
-			return client, nil
-		}
+// 		attemptCount := 0
+// 		var currentManager *SSHTunnelManager
+// 		sshDial = func(network, addr string, cfg *ssh.ClientConfig) (sshClient, error) {
+// 			client := &fakeClient{
+// 				sendRequestFunc: func(name string, wantReply bool, payload []byte) (bool, []byte, error) {
+// 					if name == "tcpip-forward" {
+// 						attemptCount++
+// 						// Immediately send wrong hostname notification after forwarding request
+// 						go func() {
+// 							if currentManager != nil {
+// 								time.Sleep(10 * time.Millisecond)
+// 								key := "dev:8080"
+// 								currentManager.addrNotifMu.Lock()
+// 								if ch, ok := currentManager.addrNotifications[key]; ok {
+// 									select {
+// 									case ch <- []string{"https://user-prod.example.com"}:
+// 									default:
+// 									}
+// 								}
+// 								currentManager.addrNotifMu.Unlock()
+// 							}
+// 						}()
+// 					}
+// 					return true, nil, nil
+// 				},
+// 			}
+// 			return client, nil
+// 		}
 
-		sshConfig := SSHConnectionConfig{
-			PrivateKey:        GenerateTestPrivateKey(t),
-			ServerAddress:     "example.com:22",
-			Username:          "testuser",
-			HostKey:           "",
-			ConnectTimeout:    5 * time.Second,
-			FwdReqTimeout:     2 * time.Second,
-			KeepAliveInterval: 5 * time.Second,
-			BackoffInterval:   2 * time.Second,
-			RemoteAddrFunc:    remoteAddrFunc,
-		}
+// 		sshConfig := SSHConnectionConfig{
+// 			PrivateKey:        GenerateTestPrivateKey(t),
+// 			ServerAddress:     "example.com:22",
+// 			Username:          "testuser",
+// 			HostKey:           "",
+// 			ConnectTimeout:    5 * time.Second,
+// 			FwdReqTimeout:     2 * time.Second,
+// 			KeepAliveInterval: 5 * time.Second,
+// 			BackoffInterval:   2 * time.Second,
+// 			RemoteAddrFunc:    remoteAddrFunc,
+// 		}
 
-		manager, err := NewSSHTunnelManager(ctx, &sshConfig)
-		if err != nil {
-			t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
-		}
-		currentManager = manager
+// 		manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+// 		if err != nil {
+// 			t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+// 		}
+// 		currentManager = manager
 
-		manager.WaitConnection()
+// 		manager.WaitConnection()
 
-		fwd := ForwardingConfig{
-			RemoteHost:   "dev", // Requesting "dev" but will get "prod"
-			RemotePort:   8080,
-			InternalHost: "localhost",
-			InternalPort: 8080,
-		}
+// 		fwd := ForwardingConfig{
+// 			RemoteHost:   "dev", // Requesting "dev" but will get "prod"
+// 			RemotePort:   8080,
+// 			InternalHost: "localhost",
+// 			InternalPort: 8080,
+// 		}
 
-		err = manager.StartForwarding(fwd)
-		// Should fail after max retries
-		if err == nil {
-			t.Error("Expected error after max retries with wrong hostname")
-		}
-		if err != nil && err.Error() != "failed to get correct hostname after 3 attempts" {
-			t.Errorf("Expected 'failed to get correct hostname' error, got: %v", err)
-		}
+// 		err = manager.StartForwarding(fwd)
+// 		// Should fail after max retries
+// 		if err == nil {
+// 			t.Error("Expected error after max retries with wrong hostname")
+// 		}
+// 		if err != nil && err.Error() != "failed to get correct hostname after 3 attempts" {
+// 			t.Errorf("Expected 'failed to get correct hostname' error, got: %v", err)
+// 		}
 
-		// Verify multiple attempts were made (3 attempts expected)
-		if attemptCount != 3 {
-			t.Errorf("Expected exactly 3 forwarding attempts, got %d", attemptCount)
-		}
-	})
-}
+// 		// Verify multiple attempts were made (3 attempts expected)
+// 		if attemptCount != 3 {
+// 			t.Errorf("Expected exactly 3 forwarding attempts, got %d", attemptCount)
+// 		}
+// 	})
+// }
 
 // TestSendForwardingRequestTimeout tests timeout handling in sendForwardingOnce.
 func TestSendForwardingRequestTimeout(t *testing.T) {

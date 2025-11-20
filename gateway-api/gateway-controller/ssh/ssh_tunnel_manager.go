@@ -370,9 +370,9 @@ const (
 
 // Constants for forwarding retry and verification logic
 const (
-	maxForwardingRetries        = 3
-	forwardingRetryDelay        = 2 * time.Second
-	addressVerificationTimeout  = 20 * time.Second
+	maxForwardingRetries        = 30
+	forwardingRetryDelay        = 15 * time.Second
+	addressVerificationTimeout  = 10 * time.Second
 	connectionWaitPollInterval  = 100 * time.Millisecond
 	addrNotificationChannelSize = 5
 )
