@@ -37,15 +37,15 @@ type Route struct {
 }
 
 type Listener struct {
+	route    *Route
 	Protocol string
 	Hostname string
 	Port     int
-	route    *Route
 }
 
 type gateway struct {
 	listeners   map[string]*Listener
-	listenersMu sync.Mutex
+	listenersMu sync.RWMutex
 }
 
 type GatewayReconciler struct {
@@ -81,7 +81,7 @@ func (r *GatewayReconciler) SetRoute(gwNamespace, gwName, listenerName, routeNam
 				InternalPort: l.route.Port,
 			})
 			if err != nil {
-				return fmt.Errorf("failed to stop forwarding: %s", err)
+				return fmt.Errorf("failed to stop forwarding: %w", err)
 			}
 		}
 		// Start the forwarding.
@@ -102,7 +102,7 @@ func (r *GatewayReconciler) SetRoute(gwNamespace, gwName, listenerName, routeNam
 			if errors.As(err, &notReadyErr) {
 				return &ErrGatewayNotReady{msg: err.Error()}
 			}
-			return fmt.Errorf("failed to start forwarding: %s", err)
+			return fmt.Errorf("failed to start forwarding: %w", err)
 		}
 		// Forwarding is set, add the new route
 		l.route = &route
@@ -135,7 +135,7 @@ func (r *GatewayReconciler) RemoveRoute(gwNamespace, gwName, listenerName, route
 		})
 		if err != nil {
 			slog.With("function", "RemoveRoute", "gateway", gwNamespace+"/"+gwName, "listener", listenerName).Error("failed to stop forwarding", "error", err)
-			return fmt.Errorf("failed to stop forwarding: %s", err)
+			return fmt.Errorf("failed to stop forwarding: %w", err)
 		}
 		l.route = nil
 		slog.With("function", "RemoveRoute", "gateway", gwNamespace+"/"+gwName, "listener", listenerName).Debug("route removed successfully")
@@ -214,6 +214,10 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			Message:            "Gateway programmed successfully",
 			LastTransitionTime: metav1.Now(),
 		})
+
+		// Populate status.addresses with actual assigned addresses from SSH tunnels
+		r.updateGatewayAddresses(&k8sGw)
+
 		if err := r.Status().Update(ctx, &k8sGw); err != nil {
 			slog.With("function", "Reconcile").Error("failed to update Gateway status", "gateway", key, "error", err)
 			return ctrl.Result{}, err
@@ -231,6 +235,49 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// updateGatewayAddresses populates the Gateway status.addresses field with the actual
+// assigned addresses from the SSH tunnel manager for each listener.
+func (r *GatewayReconciler) updateGatewayAddresses(k8sGw *gatewayv1.Gateway) {
+	r.gatewaysMu.Lock()
+	defer r.gatewaysMu.Unlock()
+
+	gwKey := getGwKey(k8sGw.Namespace, k8sGw.Name)
+	gw, exists := r.gateways[gwKey]
+	if !exists {
+		return
+	}
+
+	gw.listenersMu.RLock()
+	defer gw.listenersMu.RUnlock()
+
+	var statusAddresses []gatewayv1.GatewayStatusAddress
+	addressesSeen := make(map[string]bool)
+
+	for _, listener := range gw.listeners {
+		// Get assigned addresses for this listener from the SSH tunnel manager
+		addrs := r.manager.GetAssignedAddresses(listener.Hostname, listener.Port)
+
+		for _, addr := range addrs {
+			// Avoid duplicates
+			if addressesSeen[addr] {
+				continue
+			}
+			addressesSeen[addr] = true
+
+			// Add to status addresses
+			addrType := gatewayv1.HostnameAddressType
+			statusAddresses = append(statusAddresses, gatewayv1.GatewayStatusAddress{
+				Type:  &addrType,
+				Value: addr,
+			})
+			slog.With("function", "updateGatewayAddresses").Debug("added address to Gateway status",
+				"gateway", gwKey, "address", addr)
+		}
+	}
+
+	k8sGw.Status.Addresses = statusAddresses
 }
 
 func (r *GatewayReconciler) handleAddOrUpdateGateway(ctx context.Context, k8sGw *gatewayv1.Gateway) error {
@@ -268,12 +315,14 @@ func (r *GatewayReconciler) handleAddOrUpdateGateway(ctx context.Context, k8sGw 
 					slog.With("function", "handleAddOrUpdateGateway").Debug("listener configuration changed, updating", "listener", listenerName)
 					// Stop existing forwarding if no longer needed
 					if existing.route != nil {
-						r.manager.StopForwarding(&sshmgr.ForwardingConfig{
+						if err := r.manager.StopForwarding(&sshmgr.ForwardingConfig{
 							RemoteHost:   existing.Hostname,
 							RemotePort:   existing.Port,
 							InternalHost: existing.route.Host,
 							InternalPort: existing.route.Port,
-						})
+						}); err != nil {
+							slog.With("function", "handleAddOrUpdateGateway").Error("failed to stop existing forwarding", "listener", listenerName, "error", err)
+						}
 					}
 				}
 			}

@@ -1,27 +1,28 @@
 package controllers
 
-import "fmt"
-
+// ErrGatewayNotReady indicates the gateway is not ready to accept routes.
 type ErrGatewayNotReady struct {
 	msg string
 }
 
 func (e *ErrGatewayNotReady) Error() string {
-	return fmt.Sprintf("gateway not ready: %s", e.msg)
+	return "gateway not ready: " + e.msg
 }
 
+// ErrGatewayNotFound indicates the gateway was not found.
 type ErrGatewayNotFound struct {
 	msg string
 }
 
 func (e *ErrGatewayNotFound) Error() string {
-	return fmt.Sprintf("gateway not found: %s", e.msg)
+	return "gateway not found: " + e.msg
 }
 
+// ErrRouteNotFound indicates the route was not found.
 type ErrRouteNotFound struct {
 	msg string
 }
 
 func (e *ErrRouteNotFound) Error() string {
-	return fmt.Sprintf("route not found: %s", e.msg)
+	return "route not found: " + e.msg
 }

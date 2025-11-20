@@ -277,6 +277,58 @@ Check controller logs:
 kubectl logs -f -n ssh-gateway-system ssh-gateway-api-controller-xxx
 ```
 
+## Development
+
+### Code Quality and Linting
+
+The project uses [golangci-lint](https://golangci-lint.run/) for static code analysis. A comprehensive configuration is provided in [.golangci.yml](.golangci.yml) with 33+ linters enabled.
+
+#### Running Linters
+
+From the `gateway-api/gateway-controller` directory:
+
+```sh
+# Run linters
+make lint
+
+# Run linters with auto-fix
+make lint-fix
+
+# Run all pre-commit checks (format, vet, lint, test)
+make pre-commit
+```
+
+#### Git Pre-Commit Hook
+
+Install the pre-commit hook to automatically run checks before each commit:
+
+```sh
+cd gateway-api/gateway-controller
+make install-hooks
+```
+
+This will run `fmt`, `vet`, `lint`, and `test` before each commit. To skip the hook:
+```sh
+git commit --no-verify
+```
+
+### Testing
+
+```sh
+# Run tests
+make test
+
+# Run tests with verbose output
+make test-verbose
+
+# Run tests with coverage report
+make test-coverage
+```
+
+### Building
+
+See [Installation](#installation) section for build instructions.
+
 ## Clean up
 
 Demo app:

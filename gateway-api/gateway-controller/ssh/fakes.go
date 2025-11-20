@@ -10,7 +10,11 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// fakeAddr represents a fake network address.
+// This file contains fake/mock implementations used for testing.
+// These implementations provide minimal functionality to support unit tests
+// without requiring actual network connections or SSH servers.
+
+// fakeAddr represents a fake network address for testing.
 type fakeAddr struct{}
 
 // Network returns the network type.
@@ -46,29 +50,25 @@ func (f *fakeNetConn) SetReadDeadline(time.Time) error { return nil }
 // SetWriteDeadline sets the write deadline for the connection.
 func (f *fakeNetConn) SetWriteDeadline(time.Time) error { return nil }
 
-// fakeClient represents a fake SSH client.
-type fakeClient struct{}
+// fakeClient represents a fake SSH client for testing.
+// It implements the sshClient interface with customizable behavior.
+type fakeClient struct {
+	// sendRequestFunc allows tests to customize the behavior of SendRequest.
+	// If nil, SendRequest returns success by default.
+	sendRequestFunc func(name string, wantReply bool, payload []byte) (bool, []byte, error)
+}
 
 // Listen listens for incoming connections.
 func (f *fakeClient) Listen(network, addr string) (net.Listener, error) { return &fakeListener{}, nil }
 
-type sendRequestCalledWithParams struct {
-	FakeClient *fakeClient
-	Name       string
-	WantReply  bool
-	Payload    []byte
-}
-
-var fakeSendRequestCalledWith []sendRequestCalledWithParams
-
 // SendRequest sends a request to the server.
+// If sendRequestFunc is set, it uses that; otherwise returns success.
 func (f *fakeClient) SendRequest(name string, wantReply bool, payload []byte) (bool, []byte, error) {
-	fakeSendRequestCalledWith = append(fakeSendRequestCalledWith, sendRequestCalledWithParams{
-		FakeClient: f,
-		Name:       name,
-		WantReply:  wantReply,
-		Payload:    payload,
-	})
+	// Use custom function if provided
+	if f.sendRequestFunc != nil {
+		return f.sendRequestFunc(name, wantReply, payload)
+	}
+
 	return true, nil, nil
 }
 
@@ -156,8 +156,8 @@ func (f *fakeClient) Close() error { return nil }
 
 // fakeListener represents a fake listener.
 type fakeListener struct {
-	acceptOnce sync.Once
 	firstConn  net.Conn
+	acceptOnce sync.Once
 }
 
 // Accept accepts an incoming connection.
@@ -167,9 +167,9 @@ func (l *fakeListener) Accept() (net.Conn, error) {
 		clientConn, serverConn := net.Pipe()
 		l.firstConn = clientConn
 		go func() {
-			defer clientConn.Close()
-			defer serverConn.Close()
-			io.Copy(serverConn, clientConn)
+			defer clientConn.Close()               // #nosec G104 -- Test fake, cleanup on best effort basis
+			defer serverConn.Close()               // #nosec G104 -- Test fake, cleanup on best effort basis
+			_, _ = io.Copy(serverConn, clientConn) // #nosec G104 -- Test fake, errors don't matter
 		}()
 	})
 	if l.firstConn != nil {

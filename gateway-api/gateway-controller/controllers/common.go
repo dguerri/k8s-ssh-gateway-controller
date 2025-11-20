@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"strconv"
 	"time"
 
 	sshmgr "github.com/dguerri/ssh-gateway-api-controller/ssh"
@@ -21,9 +20,9 @@ const defaultKeepAliveInterval = 10 * time.Second
 const defaultConnectTimeout = 5 * time.Second
 
 var keyPath = getEnvOrDefault("SSH_PRIVATE_KEY_PATH", defaultKeyPath)
-var backoffInterval = getEnvOrDefault("BACKOFF_INTERVAL", defaultBackoffInterval)
-var keepAliveInterval = getEnvOrDefault("KEEP_ALIVE_INTERVAL", defaultKeepAliveInterval)
-var connectTimeout = getEnvOrDefault("CONNECT_TIMEOUT", defaultConnectTimeout)
+var backoffInterval = getEnvDurationOrDefault("BACKOFF_INTERVAL", defaultBackoffInterval)
+var keepAliveInterval = getEnvDurationOrDefault("KEEP_ALIVE_INTERVAL", defaultKeepAliveInterval)
+var connectTimeout = getEnvDurationOrDefault("CONNECT_TIMEOUT", defaultConnectTimeout)
 var sshServer = getEnvOrDefault("SSH_SERVER", defaultSSHServer)
 var sshUsername = getEnvOrDefault("SSH_USERNAME", defaultSSHUsername)
 var sshHostKey = getEnvOrDefault("SSH_HOST_KEY", "")
@@ -63,25 +62,25 @@ func removeString(slice []string, s string) []string {
 	return result
 }
 
-func getEnvOrDefault[T any](key string, defaultValue T) T {
+// getEnvOrDefault returns the environment variable value or a default string value.
+func getEnvOrDefault(key string, defaultValue string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return defaultValue
+}
+
+// getEnvDurationOrDefault returns the environment variable parsed as a duration or a default value.
+func getEnvDurationOrDefault(key string, defaultValue time.Duration) time.Duration {
 	value, exists := os.LookupEnv(key)
 	if !exists {
 		return defaultValue
 	}
-	var parsedValue T
-	switch any(defaultValue).(type) {
-	case int:
-		parsed, err := strconv.Atoi(value)
-		if err != nil {
-			return defaultValue
-		}
-		parsedValue = any(parsed).(T)
-	case string:
-		parsedValue = any(value).(T)
-	default:
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
 		return defaultValue
 	}
-	return parsedValue
+	return parsed
 }
 
 func getGwKey(gwNamespace, gwName string) string {

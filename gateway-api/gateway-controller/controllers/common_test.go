@@ -105,35 +105,56 @@ func TestRemoveString(t *testing.T) {
 }
 
 func TestGetEnvOrDefault(t *testing.T) {
-	t.Run("Environment variable exists, int", func(t *testing.T) {
-		os.Setenv("TEST_ENV_VAR", "123")
+	t.Run("Environment variable exists", func(t *testing.T) {
+		os.Setenv("TEST_ENV_VAR", "test value")
 		defer os.Unsetenv("TEST_ENV_VAR")
 
-		result := getEnvOrDefault("TEST_ENV_VAR", 0)
-		assert.Equal(t, 123, result)
+		result := getEnvOrDefault("TEST_ENV_VAR", "default value")
+		assert.Equal(t, "test value", result)
 	})
-	t.Run("Environment variable exists, string", func(t *testing.T) {
-		os.Setenv("TEST_ENV_VAR", "a string")
+
+	t.Run("Environment variable does not exist", func(t *testing.T) {
+		result := getEnvOrDefault("NON_EXISTENT_ENV_VAR", "default value")
+		assert.Equal(t, "default value", result)
+	})
+
+	t.Run("Environment variable is empty string", func(t *testing.T) {
+		os.Setenv("TEST_ENV_VAR", "")
 		defer os.Unsetenv("TEST_ENV_VAR")
 
-		result := getEnvOrDefault("TEST_ENV_VAR", "a default")
-		assert.Equal(t, "a string", result)
+		result := getEnvOrDefault("TEST_ENV_VAR", "default value")
+		assert.Equal(t, "", result)
 	})
-	t.Run("Environment variable exists, int, wrong type", func(t *testing.T) {
-		os.Setenv("TEST_ENV_VAR", "123.123")
-		defer os.Unsetenv("TEST_ENV_VAR")
+}
 
-		result := getEnvOrDefault("TEST_ENV_VAR", 42)
-		assert.Equal(t, 42, result)
+func TestGetEnvDurationOrDefault(t *testing.T) {
+	t.Run("Environment variable exists with valid duration", func(t *testing.T) {
+		os.Setenv("TEST_DURATION_VAR", "10s")
+		defer os.Unsetenv("TEST_DURATION_VAR")
+
+		result := getEnvDurationOrDefault("TEST_DURATION_VAR", 5*time.Second)
+		assert.Equal(t, 10*time.Second, result)
 	})
 
-	t.Run("Environment variable does not exist, int", func(t *testing.T) {
-		result := getEnvOrDefault("NON_EXISTENT_ENV_VAR", 42)
-		assert.Equal(t, 42, result)
+	t.Run("Environment variable exists with complex duration", func(t *testing.T) {
+		os.Setenv("TEST_DURATION_VAR", "1h30m")
+		defer os.Unsetenv("TEST_DURATION_VAR")
+
+		result := getEnvDurationOrDefault("TEST_DURATION_VAR", 5*time.Second)
+		assert.Equal(t, 90*time.Minute, result)
 	})
-	t.Run("Environment variable does not exist, string", func(t *testing.T) {
-		result := getEnvOrDefault("NON_EXISTENT_ENV_VAR", "a string")
-		assert.Equal(t, "a string", result)
+
+	t.Run("Environment variable exists with invalid duration", func(t *testing.T) {
+		os.Setenv("TEST_DURATION_VAR", "not a duration")
+		defer os.Unsetenv("TEST_DURATION_VAR")
+
+		result := getEnvDurationOrDefault("TEST_DURATION_VAR", 5*time.Second)
+		assert.Equal(t, 5*time.Second, result)
+	})
+
+	t.Run("Environment variable does not exist", func(t *testing.T) {
+		result := getEnvDurationOrDefault("NON_EXISTENT_VAR", 10*time.Second)
+		assert.Equal(t, 10*time.Second, result)
 	})
 }
 

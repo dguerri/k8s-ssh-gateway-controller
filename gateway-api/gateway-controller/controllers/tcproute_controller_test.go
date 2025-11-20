@@ -18,11 +18,11 @@ func TestExtractTCPRouteDetails(t *testing.T) {
 	backendPort := 8080
 
 	tests := []struct {
-		name          string
 		k8sRoute      *gatewayv1alpha2.TCPRoute
 		expected      *routeDetails
-		expectError   bool
+		name          string
 		expectedError string
+		expectError   bool
 	}{
 		{
 			name: "valid tcproute",

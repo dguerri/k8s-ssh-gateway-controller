@@ -1,4 +1,3 @@
-
 package controllers
 
 import (
@@ -19,11 +18,11 @@ func TestExtractHTTPRouteDetails(t *testing.T) {
 	backendPort := 8080
 
 	tests := []struct {
-		name          string
 		k8sRoute      *gatewayv1.HTTPRoute
 		expected      *routeDetails
-		expectError   bool
+		name          string
 		expectedError string
+		expectError   bool
 	}{
 		{
 			name: "valid httproute",

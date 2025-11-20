@@ -1,3 +1,5 @@
 combined-with-data.yaml
 gateway-api/gateway-controller/gateway-controller
 publish.sh
+deploy.sh
+.claude

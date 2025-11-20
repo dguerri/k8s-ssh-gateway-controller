@@ -1,0 +1,128 @@
+# golangci-lint configuration for k8s-ssh-gateway-controller
+# See: https://golangci-lint.run/usage/configuration/
+
+run:
+  timeout: 5m
+  tests: true
+  modules-download-mode: readonly
+
+linters:
+  enable:
+    # Enabled by default
+    - gosimple      # Simplify code
+    - govet         # Vet examines Go source code
+    - ineffassign   # Detect ineffectual assignments
+    - staticcheck   # Advanced Go linter
+    - unused        # Check for unused code
+
+    # Additional recommended linters
+    - gofmt         # Check code formatting
+    - goimports     # Check import formatting
+    - misspell      # Find commonly misspelled words
+    - gocyclo       # Cyclomatic complexity
+    - unparam       # Unused function parameters
+    - bodyclose     # HTTP response body close check
+    - prealloc      # Find slice declarations that could be preallocated
+    - nilerr        # Check for returning nil even with non-nil error
+    - errorlint     # Error wrapping best practices
+    - gosec         # Security issues
+    - errcheck      # Check for unchecked errors
+
+  disable:
+    - godox         # Too noisy for TODO/FIXME comments
+    - funlen        # Function length can vary
+    - lll           # Line length - enforced by gofmt
+    - errname       # Error naming convention - existing code uses Err prefix
+    - unconvert     # Unnecessary conversions - sometimes needed for type compatibility
+    - contextcheck  # Context parameter passing - architectural choice
+    - goconst       # Repeated strings - minor optimization
+    - revive        # Naming conventions - existing codebase style
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: false  # Allow assignment to blank identifier
+    exclude-functions:
+      - (io.Closer).Close
+      - (*net.Conn).Close
+      - (net.Conn).Close
+
+  govet:
+    enable-all: true
+    disable:
+      - shadow  # Too strict for this codebase
+      - fieldalignment  # Struct field alignment - micro-optimization
+
+  gocyclo:
+    min-complexity: 15
+
+  goconst:
+    min-len: 3
+    min-occurrences: 3
+
+  misspell:
+    locale: US
+
+  revive:
+    rules:
+      - name: exported
+        disabled: true  # Too noisy for existing code
+      - name: error-return
+        disabled: false
+      - name: error-naming
+        disabled: false
+      - name: if-return
+        disabled: false
+      - name: var-naming
+        disabled: false
+      - name: package-comments
+        disabled: true
+      - name: unexported-return
+        disabled: true
+
+  gosec:
+    excludes:
+      - G404  # Weak random number generator - OK for tests
+
+  errorlint:
+    errorf: true
+    asserts: true
+    comparison: true
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+  exclude-rules:
+    # Exclude some linters from running on tests files
+    - path: _test\.go
+      linters:
+        - gocyclo
+        - errcheck
+        - gosec
+        - unparam
+        - contextcheck
+
+    # Exclude some staticcheck messages
+    - linters:
+        - staticcheck
+      text: "SA1019:"
+
+    # Exclude error checks in main.go where we exit anyway
+    - path: main\.go
+      linters:
+        - errcheck
+      text: "Error return value"
+
+    # Allow unused context parameters in reconcilers (Kubernetes convention)
+    - path: _controller\.go
+      linters:
+        - unparam
+      text: "`ctx` is unused"
+
+  new: false
+
+output:
+  formats:
+    - format: colored-line-number
