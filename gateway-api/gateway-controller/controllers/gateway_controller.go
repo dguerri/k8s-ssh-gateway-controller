@@ -80,8 +80,17 @@ type gateway struct {
 	listenersMu sync.RWMutex
 }
 
+// SSHTunnelManagerInterface defines the interface for SSH tunnel management operations
+type SSHTunnelManagerInterface interface {
+	GetAssignedAddresses(hostname string, port int) []string
+	StartForwarding(config sshmgr.ForwardingConfig) error
+	StopForwarding(config *sshmgr.ForwardingConfig) error
+	Stop()
+	WaitConnection() error
+}
+
 type GatewayReconciler struct {
-	manager *sshmgr.SSHTunnelManager
+	manager SSHTunnelManagerInterface
 
 	client.Client
 	Scheme *runtime.Scheme

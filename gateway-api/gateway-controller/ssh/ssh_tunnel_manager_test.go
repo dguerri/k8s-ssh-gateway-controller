@@ -1056,3 +1056,171 @@ func TestMonitorConnectionWithFailure(t *testing.T) {
 		t.Errorf("Expected at least 2 keepalive attempts, got %d", keepaliveCallCount)
 	}
 }
+
+// TestWildcardForwardingStoresAddresses tests that wildcard (0.0.0.0) forwardings store assigned addresses
+func TestWildcardForwardingStoresAddresses(t *testing.T) {
+	SetupTest(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Mock remoteAddrFunc that extracts TCP URIs
+	remoteAddrFunc := func(data string) ([]string, error) {
+		return []string{"tcp://nue.tuns.sh:34012"}, nil
+	}
+
+	var currentManager *SSHTunnelManager
+	sshDial = func(network, addr string, cfg *ssh.ClientConfig) (sshClient, error) {
+		client := &fakeClient{
+			sendRequestFunc: func(name string, wantReply bool, payload []byte) (bool, []byte, error) {
+				if name == "tcpip-forward" {
+					// Send TCP URI notification after forwarding request
+					go func() {
+						if currentManager != nil {
+							time.Sleep(5 * time.Millisecond)
+							key := "0.0.0.0:8080"
+							currentManager.addrNotifMu.Lock()
+							if ch, ok := currentManager.addrNotifications[key]; ok {
+								select {
+								case ch <- []string{"tcp://nue.tuns.sh:34012"}:
+								default:
+								}
+							}
+							currentManager.addrNotifMu.Unlock()
+						}
+					}()
+				}
+				return true, nil, nil
+			},
+		}
+		return client, nil
+	}
+
+	sshConfig := SSHConnectionConfig{
+		PrivateKey:                 GenerateTestPrivateKey(t),
+		ServerAddress:              "example.com:22",
+		Username:                   "testuser",
+		HostKey:                    "",
+		ConnectTimeout:             5 * time.Second,
+		FwdReqTimeout:              2 * time.Second,
+		KeepAliveInterval:          5 * time.Second,
+		BackoffInterval:            2 * time.Second,
+		RemoteAddrFunc:             remoteAddrFunc,
+		MaxForwardingRetries:       3,
+		ForwardingRetryDelay:       10 * time.Millisecond,
+		AddressVerificationTimeout: 200 * time.Millisecond,
+	}
+
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+	if err != nil {
+		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+	}
+	currentManager = manager
+
+	manager.WaitConnection()
+
+	fwd := ForwardingConfig{
+		RemoteHost:   "0.0.0.0", // Wildcard - should skip verification but still store addresses
+		RemotePort:   8080,
+		InternalHost: "localhost",
+		InternalPort: 8080,
+	}
+
+	err = manager.StartForwarding(fwd)
+	if err != nil {
+		t.Fatalf("Unexpected error on wildcard StartForwarding: %v", err)
+	}
+
+	// Verify assigned addresses were stored for wildcard forwarding
+	addrs := manager.GetAssignedAddresses("0.0.0.0", 8080)
+	if len(addrs) != 1 {
+		t.Fatalf("Expected 1 assigned address for wildcard forwarding, got %d", len(addrs))
+	}
+	if addrs[0] != "tcp://nue.tuns.sh:34012" {
+		t.Errorf("Expected assigned address tcp://nue.tuns.sh:34012, got: %s", addrs[0])
+	}
+}
+
+// TestEmptyHostnameForwardingStoresAddresses tests that empty hostname forwardings store assigned addresses
+func TestEmptyHostnameForwardingStoresAddresses(t *testing.T) {
+	SetupTest(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Mock remoteAddrFunc that extracts HTTP URIs
+	remoteAddrFunc := func(data string) ([]string, error) {
+		return []string{"http://example.com", "https://example.com"}, nil
+	}
+
+	var currentManager *SSHTunnelManager
+	sshDial = func(network, addr string, cfg *ssh.ClientConfig) (sshClient, error) {
+		client := &fakeClient{
+			sendRequestFunc: func(name string, wantReply bool, payload []byte) (bool, []byte, error) {
+				if name == "tcpip-forward" {
+					// Send HTTP URI notification after forwarding request
+					go func() {
+						if currentManager != nil {
+							time.Sleep(5 * time.Millisecond)
+							key := ":80"
+							currentManager.addrNotifMu.Lock()
+							if ch, ok := currentManager.addrNotifications[key]; ok {
+								select {
+								case ch <- []string{"http://example.com", "https://example.com"}:
+								default:
+								}
+							}
+							currentManager.addrNotifMu.Unlock()
+						}
+					}()
+				}
+				return true, nil, nil
+			},
+		}
+		return client, nil
+	}
+
+	sshConfig := SSHConnectionConfig{
+		PrivateKey:                 GenerateTestPrivateKey(t),
+		ServerAddress:              "example.com:22",
+		Username:                   "testuser",
+		HostKey:                    "",
+		ConnectTimeout:             5 * time.Second,
+		FwdReqTimeout:              2 * time.Second,
+		KeepAliveInterval:          5 * time.Second,
+		BackoffInterval:            2 * time.Second,
+		RemoteAddrFunc:             remoteAddrFunc,
+		MaxForwardingRetries:       3,
+		ForwardingRetryDelay:       10 * time.Millisecond,
+		AddressVerificationTimeout: 200 * time.Millisecond,
+	}
+
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+	if err != nil {
+		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+	}
+	currentManager = manager
+
+	manager.WaitConnection()
+
+	fwd := ForwardingConfig{
+		RemoteHost:   "", // Empty hostname - should skip verification but still store addresses
+		RemotePort:   80,
+		InternalHost: "localhost",
+		InternalPort: 8080,
+	}
+
+	err = manager.StartForwarding(fwd)
+	if err != nil {
+		t.Fatalf("Unexpected error on empty hostname StartForwarding: %v", err)
+	}
+
+	// Verify assigned addresses were stored for empty hostname forwarding
+	addrs := manager.GetAssignedAddresses("", 80)
+	if len(addrs) != 2 {
+		t.Fatalf("Expected 2 assigned addresses for empty hostname forwarding, got %d", len(addrs))
+	}
+	if addrs[0] != "http://example.com" || addrs[1] != "https://example.com" {
+		t.Errorf("Expected assigned addresses http://example.com and https://example.com, got: %v", addrs)
+	}
+}
