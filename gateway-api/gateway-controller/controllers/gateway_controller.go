@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
@@ -27,6 +29,36 @@ func getGatewayControllerName() string {
 		return controllerName
 	}
 	return "tunnels.ssh.gateway-api-controller"
+}
+
+// extractHostnameFromURI extracts just the hostname from a URI.
+// For HTTP/HTTPS URIs (e.g., "https://user-dev.tuns.sh"), it returns the hostname.
+// For TCP URIs (e.g., "tcp://example.com:8080"), it returns hostname:port.
+// Returns the original string if parsing fails.
+func extractHostnameFromURI(uri string) string {
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		slog.With("function", "extractHostnameFromURI").Warn("failed to parse URI, using as-is", "uri", uri, "error", err)
+		return uri
+	}
+
+	// For HTTP/HTTPS, return just the hostname
+	if parsed.Scheme == "http" || parsed.Scheme == "https" {
+		return parsed.Hostname()
+	}
+
+	// For TCP, return hostname:port (which is in parsed.Host)
+	if parsed.Scheme == "tcp" {
+		// Remove tcp:// prefix to get host:port
+		return strings.TrimPrefix(uri, "tcp://")
+	}
+
+	// For other schemes, return the host part
+	if parsed.Host != "" {
+		return parsed.Host
+	}
+
+	return uri
 }
 
 type Route struct {
@@ -59,7 +91,7 @@ type GatewayReconciler struct {
 }
 
 // SetRoute sets up forwarding for a specific route on a listener.
-func (r *GatewayReconciler) SetRoute(gwNamespace, gwName, listenerName, routeName, routeNamespace, backendHost string, backendPort int) error {
+func (r *GatewayReconciler) SetRoute(ctx context.Context, gwNamespace, gwName, listenerName, routeName, routeNamespace, backendHost string, backendPort int) error {
 	r.gatewaysMu.Lock()
 	defer r.gatewaysMu.Unlock()
 
@@ -107,6 +139,20 @@ func (r *GatewayReconciler) SetRoute(gwNamespace, gwName, listenerName, routeNam
 		// Forwarding is set, add the new route
 		l.route = &route
 		slog.With("function", "SetRoute", "gateway", gwNamespace+"/"+gwName, "listener", listenerName).Debug("route set successfully")
+
+		// Release locks before updating Gateway status to avoid holding locks during K8s API call
+		gw.listenersMu.Unlock()
+		r.gatewaysMu.Unlock()
+
+		// Update Gateway status with assigned addresses
+		if err := r.updateGatewayStatus(ctx, gwNamespace, gwName); err != nil {
+			slog.With("function", "SetRoute", "gateway", gwNamespace+"/"+gwName).Warn("failed to update Gateway status", "error", err)
+			// Don't return error - forwarding is already set up successfully
+		}
+
+		// Reacquire locks before defers execute
+		r.gatewaysMu.Lock()
+		gw.listenersMu.Lock()
 	} else {
 		return fmt.Errorf("listener not found: %s", listenerName)
 	}
@@ -114,7 +160,7 @@ func (r *GatewayReconciler) SetRoute(gwNamespace, gwName, listenerName, routeNam
 	return nil
 }
 
-func (r *GatewayReconciler) RemoveRoute(gwNamespace, gwName, listenerName, routeName, routeNamespace, backendHost string, backendPort int) error {
+func (r *GatewayReconciler) RemoveRoute(ctx context.Context, gwNamespace, gwName, listenerName, routeName, routeNamespace, backendHost string, backendPort int) error {
 	r.gatewaysMu.Lock()
 	defer r.gatewaysMu.Unlock()
 
@@ -139,6 +185,21 @@ func (r *GatewayReconciler) RemoveRoute(gwNamespace, gwName, listenerName, route
 		}
 		l.route = nil
 		slog.With("function", "RemoveRoute", "gateway", gwNamespace+"/"+gwName, "listener", listenerName).Debug("route removed successfully")
+
+		// Release locks before updating Gateway status to avoid holding locks during K8s API call
+		gw.listenersMu.Unlock()
+		r.gatewaysMu.Unlock()
+
+		// Update Gateway status to remove addresses (if no other routes use them)
+		if err := r.updateGatewayStatus(ctx, gwNamespace, gwName); err != nil {
+			slog.With("function", "RemoveRoute", "gateway", gwNamespace+"/"+gwName).Warn("failed to update Gateway status", "error", err)
+			// Don't return error - forwarding is already stopped successfully
+		}
+
+		// Reacquire locks before defers execute
+		r.gatewaysMu.Lock()
+		gw.listenersMu.Lock()
+
 		return nil
 	}
 
@@ -260,24 +321,51 @@ func (r *GatewayReconciler) updateGatewayAddresses(k8sGw *gatewayv1.Gateway) {
 		addrs := r.manager.GetAssignedAddresses(listener.Hostname, listener.Port)
 
 		for _, addr := range addrs {
+			// Extract just the hostname from the URI
+			hostname := extractHostnameFromURI(addr)
+
 			// Avoid duplicates
-			if addressesSeen[addr] {
+			if addressesSeen[hostname] {
 				continue
 			}
-			addressesSeen[addr] = true
+			addressesSeen[hostname] = true
 
 			// Add to status addresses
 			addrType := gatewayv1.HostnameAddressType
 			statusAddresses = append(statusAddresses, gatewayv1.GatewayStatusAddress{
 				Type:  &addrType,
-				Value: addr,
+				Value: hostname,
 			})
 			slog.With("function", "updateGatewayAddresses").Debug("added address to Gateway status",
-				"gateway", gwKey, "address", addr)
+				"gateway", gwKey, "uri", addr, "hostname", hostname)
 		}
 	}
 
 	k8sGw.Status.Addresses = statusAddresses
+}
+
+// updateGatewayStatus fetches the Gateway resource and updates its status with current addresses.
+// This should be called after route attachment/removal to reflect address changes.
+func (r *GatewayReconciler) updateGatewayStatus(ctx context.Context, gwNamespace, gwName string) error {
+	gwKey := getGwKey(gwNamespace, gwName)
+
+	var k8sGw gatewayv1.Gateway
+	if err := r.Get(ctx, client.ObjectKey{Namespace: gwNamespace, Name: gwName}, &k8sGw); err != nil {
+		slog.With("function", "updateGatewayStatus").Error("failed to fetch Gateway", "gateway", gwKey, "error", err)
+		return fmt.Errorf("failed to fetch Gateway %s: %w", gwKey, err)
+	}
+
+	// Update addresses from SSH tunnel manager
+	r.updateGatewayAddresses(&k8sGw)
+
+	// Update the Gateway status
+	if err := r.Status().Update(ctx, &k8sGw); err != nil {
+		slog.With("function", "updateGatewayStatus").Error("failed to update Gateway status", "gateway", gwKey, "error", err)
+		return fmt.Errorf("failed to update Gateway status for %s: %w", gwKey, err)
+	}
+
+	slog.With("function", "updateGatewayStatus").Debug("updated Gateway status with addresses", "gateway", gwKey)
+	return nil
 }
 
 func (r *GatewayReconciler) handleAddOrUpdateGateway(ctx context.Context, k8sGw *gatewayv1.Gateway) error {

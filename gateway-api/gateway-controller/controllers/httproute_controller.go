@@ -58,6 +58,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 
 		err := r.GatewayReconciler.SetRoute(
+			ctx,
 			routeDetails.gwNamespace, routeDetails.gwName,
 			routeDetails.listenerName,
 			routeDetails.routeName, routeDetails.routeNamespace,
@@ -78,6 +79,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Debug("deleting HTTPRoute")
 		if containsString(k8sRoute.Finalizers, httpRouteFinalizer) {
 			err := r.GatewayReconciler.RemoveRoute(
+				ctx,
 				routeDetails.gwNamespace, routeDetails.gwName,
 				routeDetails.listenerName,
 				routeDetails.routeName, routeDetails.routeNamespace,

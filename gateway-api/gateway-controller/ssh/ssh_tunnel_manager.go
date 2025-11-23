@@ -372,7 +372,7 @@ const (
 const (
 	maxForwardingRetries        = 30
 	forwardingRetryDelay        = 15 * time.Second
-	addressVerificationTimeout  = 10 * time.Second
+	addressVerificationTimeout  = 30 * time.Second
 	connectionWaitPollInterval  = 100 * time.Millisecond
 	addrNotificationChannelSize = 5
 )

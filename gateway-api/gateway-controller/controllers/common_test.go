@@ -251,3 +251,54 @@ func TestGetRemoteAddress(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractHostnameFromURI(t *testing.T) {
+	tests := []struct {
+		name     string
+		uri      string
+		expected string
+	}{
+		{
+			name:     "HTTP URI",
+			uri:      "http://my-web-test.nue.tuns.sh",
+			expected: "my-web-test.nue.tuns.sh",
+		},
+		{
+			name:     "HTTPS URI",
+			uri:      "https://user-dev.tuns.sh",
+			expected: "user-dev.tuns.sh",
+		},
+		{
+			name:     "HTTPS URI with port",
+			uri:      "https://example.com:8443",
+			expected: "example.com",
+		},
+		{
+			name:     "TCP URI with host:port",
+			uri:      "tcp://example.com:8080",
+			expected: "example.com:8080",
+		},
+		{
+			name:     "TCP URI with IP:port",
+			uri:      "tcp://192.168.1.100:3000",
+			expected: "192.168.1.100:3000",
+		},
+		{
+			name:     "Plain hostname (no scheme)",
+			uri:      "example.com",
+			expected: "example.com",
+		},
+		{
+			name:     "Hostname with port (no scheme)",
+			uri:      "example.com:8080",
+			expected: "example.com:8080",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractHostnameFromURI(tt.uri)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
