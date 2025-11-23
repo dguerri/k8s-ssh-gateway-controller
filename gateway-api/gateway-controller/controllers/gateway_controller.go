@@ -330,14 +330,27 @@ func (r *GatewayReconciler) updateGatewayAddresses(k8sGw *gatewayv1.Gateway) {
 			}
 			addressesSeen[hostname] = true
 
-			// Add to status addresses
-			addrType := gatewayv1.HostnameAddressType
+			// Determine address type based on whether it contains a port
+			// For TCP URIs like "tcp://nue.tuns.sh:34012", hostname will be "nue.tuns.sh:34012"
+			// Gateway API address types:
+			// - HostnameAddressType: DNS hostname without port
+			// - IPAddressType: IP address (with or without port)
+			// - NamedAddressType: implementation-specific format
+			var addrType gatewayv1.AddressType
+			if strings.Contains(hostname, ":") {
+				// Contains port - use NamedAddressType for hostname:port combinations
+				addrType = gatewayv1.NamedAddressType
+			} else {
+				// Just hostname - use HostnameAddressType
+				addrType = gatewayv1.HostnameAddressType
+			}
+
 			statusAddresses = append(statusAddresses, gatewayv1.GatewayStatusAddress{
 				Type:  &addrType,
 				Value: hostname,
 			})
 			slog.With("function", "updateGatewayAddresses").Debug("added address to Gateway status",
-				"gateway", gwKey, "uri", addr, "hostname", hostname)
+				"gateway", gwKey, "uri", addr, "hostname", hostname, "type", addrType)
 		}
 	}
 

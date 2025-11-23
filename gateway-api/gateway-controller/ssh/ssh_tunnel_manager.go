@@ -451,8 +451,8 @@ func (m *SSHTunnelManager) sendForwarding(fwd *ForwardingConfig, req ForwardRequ
 			return nil
 		}
 
-		// For ForwardStart, verify we got the correct hostname (if remoteAddrFunc is available)
-		if m.remoteAddrFunc != nil && (fwd.RemoteHost != "" && fwd.RemoteHost != "0.0.0.0") {
+		// For ForwardStart, collect assigned addresses (if remoteAddrFunc is available)
+		if m.remoteAddrFunc != nil {
 			key := forwardingKey(fwd.RemoteHost, fwd.RemotePort)
 
 			// Register for address notifications
@@ -464,34 +464,50 @@ func (m *SSHTunnelManager) sendForwarding(fwd *ForwardingConfig, req ForwardRequ
 			// Wait for address assignment with timeout
 			verifyCtx, verifyCancel := context.WithTimeout(m.externalCtx, m.addressVerificationTimeout)
 			matched := false
+			needsVerification := fwd.RemoteHost != "" && fwd.RemoteHost != "0.0.0.0"
 
 		waitLoop:
 			for {
 				select {
 				case <-verifyCtx.Done():
 					verifyCancel()
-					// Timeout waiting for address - continue anyway
-					slog.With("function", "sendForwarding").Warn("timeout waiting for address verification, continuing anyway",
-						"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
+					if needsVerification {
+						// Timeout waiting for address - continue anyway
+						slog.With("function", "sendForwarding").Warn("timeout waiting for address verification, continuing anyway",
+							"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
+					}
 					matched = true
 					break waitLoop
 				case uris := <-notifCh:
-					if matchesRequestedHost(uris, fwd.RemoteHost, fwd.RemotePort) {
-						slog.With("function", "sendForwarding").Info("verified correct hostname assigned",
-							"remote_host", fwd.RemoteHost, "uris", uris)
-						matched = true
-						// Store the assigned addresses
+					if needsVerification {
+						// Verify hostname matches for specific hostnames
+						if matchesRequestedHost(uris, fwd.RemoteHost, fwd.RemotePort) {
+							slog.With("function", "sendForwarding").Info("verified correct hostname assigned",
+								"remote_host", fwd.RemoteHost, "uris", uris)
+							matched = true
+							// Store the assigned addresses
+							m.addrNotifMu.Lock()
+							m.assignedAddrs[key] = uris
+							m.addrNotifMu.Unlock()
+							verifyCancel()
+							break waitLoop
+						} else {
+							slog.With("function", "sendForwarding").Warn("wrong hostname assigned, will retry",
+								"requested_host", fwd.RemoteHost, "received_uris", uris, "attempt", attempt+1)
+							verifyCancel()
+							// Cancel this forwarding and retry
+							_ = m.sendForwardingOnce(fwd, ForwardCancel)
+							break waitLoop
+						}
+					} else {
+						// For wildcard (0.0.0.0), just store whatever address we got
+						slog.With("function", "sendForwarding").Debug("storing assigned addresses for wildcard forwarding",
+							"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort, "uris", uris)
 						m.addrNotifMu.Lock()
 						m.assignedAddrs[key] = uris
 						m.addrNotifMu.Unlock()
 						verifyCancel()
-						break waitLoop
-					} else {
-						slog.With("function", "sendForwarding").Warn("wrong hostname assigned, will retry",
-							"requested_host", fwd.RemoteHost, "received_uris", uris, "attempt", attempt+1)
-						verifyCancel()
-						// Cancel this forwarding and retry
-						_ = m.sendForwardingOnce(fwd, ForwardCancel)
+						matched = true
 						break waitLoop
 					}
 				}
@@ -508,7 +524,7 @@ func (m *SSHTunnelManager) sendForwarding(fwd *ForwardingConfig, req ForwardRequ
 			}
 			// Continue to next retry attempt
 		} else {
-			// No verification needed
+			// No remoteAddrFunc provided, can't collect addresses
 			return nil
 		}
 	}
