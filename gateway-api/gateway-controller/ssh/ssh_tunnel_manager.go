@@ -53,17 +53,20 @@ type ExtractAddrFunc func(string) ([]string, error)
 
 // SSHConnectionConfig contains configuration for SSH connection.
 type SSHConnectionConfig struct {
-	RemoteAddrFunc    ExtractAddrFunc
-	SSHDialFunc       sshDialFunc
-	NetDialFunc       netDialFunc
-	ServerAddress     string
-	Username          string
-	HostKey           string
-	PrivateKey        []byte
-	ConnectTimeout    time.Duration
-	FwdReqTimeout     time.Duration
-	KeepAliveInterval time.Duration
-	BackoffInterval   time.Duration
+	RemoteAddrFunc             ExtractAddrFunc
+	SSHDialFunc                sshDialFunc
+	NetDialFunc                netDialFunc
+	ServerAddress              string
+	Username                   string
+	HostKey                    string
+	PrivateKey                 []byte
+	ConnectTimeout             time.Duration
+	FwdReqTimeout              time.Duration
+	KeepAliveInterval          time.Duration
+	BackoffInterval            time.Duration
+	MaxForwardingRetries       int           // Optional: max retries for hostname verification (default: 30)
+	ForwardingRetryDelay       time.Duration // Optional: delay between retries (default: 15s)
+	AddressVerificationTimeout time.Duration // Optional: timeout for address verification (default: 30s)
 }
 
 // ForwardingConfig defines configuration for a single forwarding.
@@ -76,27 +79,30 @@ type ForwardingConfig struct {
 
 // SSHTunnelManager manages SSH tunnels and forwardings.
 type SSHTunnelManager struct {
-	externalCtx       context.Context
-	client            sshClient
-	connectionCtx     context.Context
-	signer            ssh.Signer
-	forwardings       map[string]*ForwardingConfig
-	remoteAddrFunc    ExtractAddrFunc
-	netDialFunc       netDialFunc
-	sshDialFunc       sshDialFunc
-	addrNotifications map[string]chan []string
-	assignedAddrs     map[string][]string
-	connectionCancel  context.CancelFunc
-	hostKey           string
-	sshUser           string
-	sshServerAddress  string
-	fwdReqTimeout     time.Duration
-	connTimeout       time.Duration
-	backoffInterval   time.Duration
-	keepAliveInterval time.Duration
-	clientMu          sync.RWMutex
-	addrNotifMu       sync.Mutex
-	connected         bool
+	externalCtx                context.Context
+	client                     sshClient
+	connectionCtx              context.Context
+	signer                     ssh.Signer
+	forwardings                map[string]*ForwardingConfig
+	remoteAddrFunc             ExtractAddrFunc
+	netDialFunc                netDialFunc
+	sshDialFunc                sshDialFunc
+	addrNotifications          map[string]chan []string
+	assignedAddrs              map[string][]string
+	connectionCancel           context.CancelFunc
+	hostKey                    string
+	sshUser                    string
+	sshServerAddress           string
+	fwdReqTimeout              time.Duration
+	connTimeout                time.Duration
+	backoffInterval            time.Duration
+	keepAliveInterval          time.Duration
+	maxForwardingRetries       int
+	forwardingRetryDelay       time.Duration
+	addressVerificationTimeout time.Duration
+	clientMu                   sync.RWMutex
+	addrNotifMu                sync.Mutex
+	connected                  bool
 }
 
 // forwardingKey generates a unique key for the forwarding session based on remote host and port.
@@ -123,23 +129,40 @@ func NewSSHTunnelManager(externalCtx context.Context, config *SSHConnectionConfi
 		netDialFn = netDial // Use global for backward compatibility
 	}
 
+	// Set timeout values with defaults
+	maxRetries := config.MaxForwardingRetries
+	if maxRetries == 0 {
+		maxRetries = maxForwardingRetries // Use constant default
+	}
+	retryDelay := config.ForwardingRetryDelay
+	if retryDelay == 0 {
+		retryDelay = forwardingRetryDelay
+	}
+	addrVerifyTimeout := config.AddressVerificationTimeout
+	if addrVerifyTimeout == 0 {
+		addrVerifyTimeout = addressVerificationTimeout
+	}
+
 	m := &SSHTunnelManager{
-		sshServerAddress:  config.ServerAddress,
-		sshUser:           config.Username,
-		hostKey:           config.HostKey,
-		signer:            signer,
-		connTimeout:       config.ConnectTimeout,
-		fwdReqTimeout:     config.FwdReqTimeout,
-		keepAliveInterval: config.KeepAliveInterval,
-		backoffInterval:   config.BackoffInterval,
-		externalCtx:       externalCtx,
-		connected:         false,
-		remoteAddrFunc:    config.RemoteAddrFunc,
-		forwardings:       make(map[string]*ForwardingConfig),
-		assignedAddrs:     make(map[string][]string),
-		addrNotifications: make(map[string]chan []string),
-		sshDialFunc:       sshDialFn,
-		netDialFunc:       netDialFn,
+		sshServerAddress:           config.ServerAddress,
+		sshUser:                    config.Username,
+		hostKey:                    config.HostKey,
+		signer:                     signer,
+		connTimeout:                config.ConnectTimeout,
+		fwdReqTimeout:              config.FwdReqTimeout,
+		keepAliveInterval:          config.KeepAliveInterval,
+		backoffInterval:            config.BackoffInterval,
+		maxForwardingRetries:       maxRetries,
+		forwardingRetryDelay:       retryDelay,
+		addressVerificationTimeout: addrVerifyTimeout,
+		externalCtx:                externalCtx,
+		connected:                  false,
+		remoteAddrFunc:             config.RemoteAddrFunc,
+		forwardings:                make(map[string]*ForwardingConfig),
+		assignedAddrs:              make(map[string][]string),
+		addrNotifications:          make(map[string]chan []string),
+		sshDialFunc:                sshDialFn,
+		netDialFunc:                netDialFn,
 	}
 	go m.handleConnection()
 
@@ -411,11 +434,11 @@ func matchesRequestedHost(uris []string, requestedHost string, requestedPort int
 // It returns an error if the request fails or is denied by the server.
 // Must be called with a lock on m.clientMu
 func (m *SSHTunnelManager) sendForwarding(fwd *ForwardingConfig, req ForwardRequest) error {
-	for attempt := 0; attempt < maxForwardingRetries; attempt++ {
+	for attempt := 0; attempt < m.maxForwardingRetries; attempt++ {
 		if attempt > 0 {
 			slog.With("function", "sendForwarding").Info("retrying forwarding request",
-				"attempt", attempt+1, "max_retries", maxForwardingRetries, "remote_host", fwd.RemoteHost)
-			time.Sleep(forwardingRetryDelay)
+				"attempt", attempt+1, "max_retries", m.maxForwardingRetries, "remote_host", fwd.RemoteHost)
+			time.Sleep(m.forwardingRetryDelay)
 		}
 
 		err := m.sendForwardingOnce(fwd, req)
@@ -439,7 +462,7 @@ func (m *SSHTunnelManager) sendForwarding(fwd *ForwardingConfig, req ForwardRequ
 			m.addrNotifMu.Unlock()
 
 			// Wait for address assignment with timeout
-			verifyCtx, verifyCancel := context.WithTimeout(m.externalCtx, addressVerificationTimeout)
+			verifyCtx, verifyCancel := context.WithTimeout(m.externalCtx, m.addressVerificationTimeout)
 			matched := false
 
 		waitLoop:
@@ -490,7 +513,7 @@ func (m *SSHTunnelManager) sendForwarding(fwd *ForwardingConfig, req ForwardRequ
 		}
 	}
 
-	return fmt.Errorf("failed to get correct hostname after %d attempts", maxForwardingRetries)
+	return fmt.Errorf("failed to get correct hostname after %d attempts", m.maxForwardingRetries)
 }
 
 // sendForwardingOnce sends a single forwarding request without retry logic.
