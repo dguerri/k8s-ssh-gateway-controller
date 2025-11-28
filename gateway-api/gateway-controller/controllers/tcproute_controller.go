@@ -10,7 +10,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 )
 
@@ -26,7 +25,6 @@ type TCPRouteReconciler struct {
 func (r *TCPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1alpha2.TCPRoute{}).
-		WithEventFilter(predicate.GenerationChangedPredicate{}). // only trigger on spec changes
 		Complete(r)
 }
 
@@ -37,6 +35,13 @@ func (r *TCPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.Get(ctx, req.NamespacedName, &k8sRoute); err != nil {
 		slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Debug("unable to retrieve TCPRoute", "error", err)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// Check if route is being deleted
+	if !k8sRoute.DeletionTimestamp.IsZero() {
+		slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Info("TCPRoute is being deleted",
+			"deletionTimestamp", k8sRoute.DeletionTimestamp,
+			"hasFinalizer", containsString(k8sRoute.Finalizers, tcpRouteFinalizer))
 	}
 
 	routeDetails, err := extractTCPRouteDetails(&k8sRoute)
@@ -67,8 +72,12 @@ func (r *TCPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			var notReadyErr *ErrGatewayNotReady
 			var notFoundErr *ErrGatewayNotFound
 			if errors.As(err, &notReadyErr) || errors.As(err, &notFoundErr) {
-				slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Debug("gateway not ready, requeuing TCPRoute")
-				return ctrl.Result{Requeue: true, RequeueAfter: 1 * time.Second}, nil
+				slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Warn("gateway not ready or not found, will retry",
+					"gateway", fmt.Sprintf("%s/%s", routeDetails.gwNamespace, routeDetails.gwName),
+					"error", err.Error())
+				// Requeue with fixed delay to retry when gateway becomes ready
+				// Don't return error to avoid exponential backoff that could delay recovery
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
 			slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Error("failed to set route", "error", err)
 			return ctrl.Result{}, err
@@ -76,6 +85,7 @@ func (r *TCPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Debug("route set successfully")
 	} else {
 		// Handle deletion
+		slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Info("processing TCPRoute deletion")
 		if containsString(k8sRoute.Finalizers, tcpRouteFinalizer) {
 			err := r.GatewayReconciler.RemoveRoute(
 				ctx,

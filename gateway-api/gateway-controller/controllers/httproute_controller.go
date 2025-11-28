@@ -10,7 +10,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
@@ -26,7 +25,6 @@ type HTTPRouteReconciler struct {
 func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1.HTTPRoute{}).
-		WithEventFilter(predicate.GenerationChangedPredicate{}). // only trigger on spec changes
 		Complete(r)
 }
 
@@ -67,8 +65,12 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			var notReadyErr *ErrGatewayNotReady
 			var notFoundErr *ErrGatewayNotFound
 			if errors.As(err, &notReadyErr) || errors.As(err, &notFoundErr) {
-				slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Debug("gateway not ready, requeuing HTTPRoute")
-				return ctrl.Result{Requeue: true, RequeueAfter: 1 * time.Second}, nil
+				slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Warn("gateway not ready or not found, will retry",
+					"gateway", fmt.Sprintf("%s/%s", routeDetails.gwNamespace, routeDetails.gwName),
+					"error", err.Error())
+				// Requeue with fixed delay to retry when gateway becomes ready
+				// Don't return error to avoid exponential backoff that could delay recovery
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
 			slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Error("failed to set route", "error", err)
 			return ctrl.Result{}, err

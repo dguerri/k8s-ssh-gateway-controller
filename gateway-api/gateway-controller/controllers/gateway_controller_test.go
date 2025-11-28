@@ -262,3 +262,95 @@ func (m *mockSSHTunnelManager) IsConnected() bool {
 func forwardingKey(hostname string, port int) string {
 	return fmt.Sprintf("%s:%d", hostname, port)
 }
+
+// TestGatewayAddressesEqual tests the address comparison function
+func TestGatewayAddressesEqual(t *testing.T) {
+	hostnameType := gatewayv1.HostnameAddressType
+	namedType := gatewayv1.NamedAddressType
+
+	tests := []struct {
+		name     string
+		a        []gatewayv1.GatewayStatusAddress
+		b        []gatewayv1.GatewayStatusAddress
+		expected bool
+	}{
+		{
+			name:     "both empty",
+			a:        []gatewayv1.GatewayStatusAddress{},
+			b:        []gatewayv1.GatewayStatusAddress{},
+			expected: true,
+		},
+		{
+			name: "same addresses same order",
+			a: []gatewayv1.GatewayStatusAddress{
+				{Type: &hostnameType, Value: "example.com"},
+				{Type: &namedType, Value: "server:8080"},
+			},
+			b: []gatewayv1.GatewayStatusAddress{
+				{Type: &hostnameType, Value: "example.com"},
+				{Type: &namedType, Value: "server:8080"},
+			},
+			expected: true,
+		},
+		{
+			name: "same addresses different order",
+			a: []gatewayv1.GatewayStatusAddress{
+				{Type: &hostnameType, Value: "example.com"},
+				{Type: &namedType, Value: "server:8080"},
+			},
+			b: []gatewayv1.GatewayStatusAddress{
+				{Type: &namedType, Value: "server:8080"},
+				{Type: &hostnameType, Value: "example.com"},
+			},
+			expected: true,
+		},
+		{
+			name: "different lengths",
+			a: []gatewayv1.GatewayStatusAddress{
+				{Type: &hostnameType, Value: "example.com"},
+			},
+			b: []gatewayv1.GatewayStatusAddress{
+				{Type: &hostnameType, Value: "example.com"},
+				{Type: &namedType, Value: "server:8080"},
+			},
+			expected: false,
+		},
+		{
+			name: "different values",
+			a: []gatewayv1.GatewayStatusAddress{
+				{Type: &hostnameType, Value: "example.com"},
+			},
+			b: []gatewayv1.GatewayStatusAddress{
+				{Type: &hostnameType, Value: "different.com"},
+			},
+			expected: false,
+		},
+		{
+			name: "different types",
+			a: []gatewayv1.GatewayStatusAddress{
+				{Type: &hostnameType, Value: "example.com"},
+			},
+			b: []gatewayv1.GatewayStatusAddress{
+				{Type: &namedType, Value: "example.com"},
+			},
+			expected: false,
+		},
+		{
+			name: "nil type defaults to Hostname",
+			a: []gatewayv1.GatewayStatusAddress{
+				{Value: "example.com"},
+			},
+			b: []gatewayv1.GatewayStatusAddress{
+				{Type: &hostnameType, Value: "example.com"},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := gatewayAddressesEqual(tt.a, tt.b)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}

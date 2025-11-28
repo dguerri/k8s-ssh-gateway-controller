@@ -202,15 +202,36 @@ func (m *SSHTunnelManager) monitorConnection() {
 			client := m.client
 			m.clientMu.RUnlock()
 
-			_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
-			if err != nil {
-				slog.With("function", "monitorConnection").Error("ssh keepalive failed, closing connection", "error", err)
+			// Send keepalive with timeout to avoid hanging indefinitely
+			type keepaliveResult struct {
+				err error
+			}
+			resultCh := make(chan keepaliveResult, 1)
+
+			go func() {
+				_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
+				resultCh <- keepaliveResult{err: err}
+			}()
+
+			// Wait for keepalive response with timeout
+			keepaliveTimeout := m.keepAliveInterval * 2 // 2x keepalive interval
+			select {
+			case result := <-resultCh:
+				if result.err != nil {
+					slog.With("function", "monitorConnection").Error("ssh keepalive failed, closing connection", "error", result.err)
+					m.clientMu.Lock()
+					m.closeClient()
+					m.clientMu.Unlock()
+					return
+				}
+				slog.With("function", "monitorConnection").Debug("ssh keepalive sent")
+			case <-time.After(keepaliveTimeout):
+				slog.With("function", "monitorConnection").Error("ssh keepalive timeout, closing connection", "timeout", keepaliveTimeout)
 				m.clientMu.Lock()
 				m.closeClient()
 				m.clientMu.Unlock()
 				return
 			}
-			slog.With("function", "monitorConnection").Debug("ssh keepalive sent")
 		}
 	}
 }

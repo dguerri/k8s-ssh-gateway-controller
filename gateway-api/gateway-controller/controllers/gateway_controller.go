@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	sshmgr "github.com/dguerri/ssh-gateway-api-controller/ssh"
 )
@@ -106,8 +107,18 @@ func (r *GatewayReconciler) SetRoute(ctx context.Context, gwNamespace, gwName, l
 	r.gatewaysMu.Lock()
 	defer r.gatewaysMu.Unlock()
 
-	gw := r.gateways[getGwKey(gwNamespace, gwName)]
+	gwKey := getGwKey(gwNamespace, gwName)
+	gw := r.gateways[gwKey]
 	if gw == nil {
+		// List available gateway names for debugging
+		var availableGWs []string
+		for k := range r.gateways {
+			availableGWs = append(availableGWs, k)
+		}
+		slog.With("function", "SetRoute").Warn("gateway not found in internal registry",
+			"requestedGateway", gwKey,
+			"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
+			"availableGateways", availableGWs)
 		return &ErrGatewayNotFound{msg: fmt.Sprintf("gateway not found: %s/%s", gwNamespace, gwName)}
 	}
 
@@ -115,6 +126,11 @@ func (r *GatewayReconciler) SetRoute(ctx context.Context, gwNamespace, gwName, l
 	defer gw.listenersMu.Unlock()
 
 	if l, exist := gw.listeners[listenerName]; exist {
+		slog.With("function", "SetRoute").Debug("found listener for route",
+			"gateway", gwKey,
+			"listener", listenerName,
+			"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
+			"hasExistingRoute", l.route != nil)
 		if l.route != nil {
 			// Stop the forwarding.
 			err := r.manager.StopForwarding(&sshmgr.ForwardingConfig{
@@ -134,6 +150,17 @@ func (r *GatewayReconciler) SetRoute(ctx context.Context, gwNamespace, gwName, l
 			Host:      backendHost,
 			Port:      backendPort,
 		}
+
+		// Check SSH connection status before attempting to start forwarding
+		connected := r.manager.IsConnected()
+		if !connected {
+			slog.With("function", "SetRoute").Warn("SSH manager is not connected, cannot start forwarding",
+				"gateway", gwKey,
+				"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
+				"listener", listenerName)
+			return &ErrGatewayNotReady{msg: "SSH client not connected"}
+		}
+
 		err := r.manager.StartForwarding(sshmgr.ForwardingConfig{
 			RemoteHost:   l.Hostname,
 			RemotePort:   l.Port,
@@ -143,13 +170,24 @@ func (r *GatewayReconciler) SetRoute(ctx context.Context, gwNamespace, gwName, l
 		if err != nil {
 			var notReadyErr *sshmgr.ErrSSHClientNotReady
 			if errors.As(err, &notReadyErr) {
+				slog.With("function", "SetRoute").Warn("SSH client became not ready during forwarding",
+					"gateway", gwKey,
+					"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
+					"error", err)
 				return &ErrGatewayNotReady{msg: err.Error()}
 			}
+			slog.With("function", "SetRoute").Error("failed to start forwarding",
+				"gateway", gwKey,
+				"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
+				"listener", listenerName,
+				"error", err)
 			return fmt.Errorf("failed to start forwarding: %w", err)
 		}
 		// Forwarding is set, add the new route
 		l.route = &route
-		slog.With("function", "SetRoute", "gateway", gwNamespace+"/"+gwName, "listener", listenerName).Debug("route set successfully")
+		slog.With("function", "SetRoute", "gateway", gwNamespace+"/"+gwName, "listener", listenerName).Info("route set successfully",
+			"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
+			"backend", fmt.Sprintf("%s:%d", backendHost, backendPort))
 
 		// Release locks before updating Gateway status to avoid holding locks during K8s API call
 		gw.listenersMu.Unlock()
@@ -165,6 +203,16 @@ func (r *GatewayReconciler) SetRoute(ctx context.Context, gwNamespace, gwName, l
 		r.gatewaysMu.Lock()
 		gw.listenersMu.Lock()
 	} else {
+		// List available listeners for debugging
+		var availableListeners []string
+		for name := range gw.listeners {
+			availableListeners = append(availableListeners, name)
+		}
+		slog.With("function", "SetRoute").Warn("listener not found for route",
+			"requestedListener", listenerName,
+			"gateway", gwKey,
+			"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
+			"availableListeners", availableListeners)
 		return fmt.Errorf("listener not found: %s", listenerName)
 	}
 
@@ -249,13 +297,22 @@ func (r *GatewayReconciler) syncAllRoutes() {
 	r.gatewaysMu.Lock()
 	defer r.gatewaysMu.Unlock()
 
-	slog.With("function", "syncAllRoutes").Info("syncing all routes after reconnection")
+	totalGateways := len(r.gateways)
+	totalListeners := 0
+	routesRestored := 0
+	listenersWithoutRoutes := 0
+
+	slog.With("function", "syncAllRoutes").Info("syncing all routes after reconnection",
+		"gateways", totalGateways)
 
 	for gwKey, gw := range r.gateways {
 		gw.listenersMu.Lock()
+		totalListeners += len(gw.listeners)
 		for listenerName, l := range gw.listeners {
 			if l.route != nil {
-				slog.With("function", "syncAllRoutes", "gateway", gwKey, "listener", listenerName).Debug("restoring route forwarding")
+				slog.With("function", "syncAllRoutes", "gateway", gwKey, "listener", listenerName).Info("restoring route forwarding",
+					"route", fmt.Sprintf("%s/%s", l.route.Namespace, l.route.Name),
+					"backend", fmt.Sprintf("%s:%d", l.route.Host, l.route.Port))
 				err := r.manager.StartForwarding(sshmgr.ForwardingConfig{
 					RemoteHost:   l.Hostname,
 					RemotePort:   l.Port,
@@ -266,14 +323,104 @@ func (r *GatewayReconciler) syncAllRoutes() {
 					// Check if forwarding already exists (might happen if we didn't really lose connection but IsConnected returned false incorrectly, though unlikely)
 					var existsErr *sshmgr.ErrSSHForwardingExists
 					if errors.As(err, &existsErr) {
+						slog.With("function", "syncAllRoutes", "gateway", gwKey, "listener", listenerName).Debug("forwarding already exists, skipping")
+						routesRestored++
 						continue
 					}
 					slog.With("function", "syncAllRoutes", "gateway", gwKey, "listener", listenerName).Error("failed to restore forwarding", "error", err)
+				} else {
+					routesRestored++
+					slog.With("function", "syncAllRoutes", "gateway", gwKey, "listener", listenerName).Info("route forwarding restored successfully")
 				}
+			} else {
+				listenersWithoutRoutes++
+				slog.With("function", "syncAllRoutes", "gateway", gwKey, "listener", listenerName).Debug("listener has no route assigned, skipping")
 			}
 		}
 		gw.listenersMu.Unlock()
 	}
+
+	slog.With("function", "syncAllRoutes").Info("route sync completed",
+		"totalGateways", totalGateways,
+		"totalListeners", totalListeners,
+		"routesRestored", routesRestored,
+		"listenersWithoutRoutes", listenersWithoutRoutes)
+}
+
+// triggerHTTPRouteReconciliation triggers reconciliation of HTTPRoutes referencing the gateway
+func (r *GatewayReconciler) triggerHTTPRouteReconciliation(ctx context.Context, gwNamespace, gwName string) {
+	var httpRoutes gatewayv1.HTTPRouteList
+	if err := r.List(ctx, &httpRoutes, client.InNamespace(gwNamespace)); err != nil {
+		slog.With("function", "triggerHTTPRouteReconciliation").Error("failed to list HTTPRoutes", "error", err)
+		return
+	}
+
+	for i := range httpRoutes.Items {
+		route := &httpRoutes.Items[i]
+		if r.routeReferencesGateway(route.Spec.ParentRefs, gwNamespace, gwName) {
+			r.addReconnectionAnnotation(ctx, route, "HTTPRoute")
+		}
+	}
+}
+
+// triggerTCPRouteReconciliation triggers reconciliation of TCPRoutes referencing the gateway
+func (r *GatewayReconciler) triggerTCPRouteReconciliation(ctx context.Context, gwNamespace, gwName string) {
+	var tcpRoutes gatewayv1alpha2.TCPRouteList
+	if err := r.List(ctx, &tcpRoutes, client.InNamespace(gwNamespace)); err != nil {
+		slog.With("function", "triggerTCPRouteReconciliation").Error("failed to list TCPRoutes", "error", err)
+		return
+	}
+
+	for i := range tcpRoutes.Items {
+		route := &tcpRoutes.Items[i]
+		if r.routeReferencesGateway(route.Spec.ParentRefs, gwNamespace, gwName) {
+			r.addReconnectionAnnotation(ctx, route, "TCPRoute")
+		}
+	}
+}
+
+// routeReferencesGateway checks if any parentRef references the specified gateway
+func (r *GatewayReconciler) routeReferencesGateway(parentRefs []gatewayv1.ParentReference, gwNamespace, gwName string) bool {
+	for _, parentRef := range parentRefs {
+		parentNs := gwNamespace
+		if parentRef.Namespace != nil {
+			parentNs = string(*parentRef.Namespace)
+		}
+		if string(parentRef.Name) == gwName && parentNs == gwNamespace {
+			return true
+		}
+	}
+	return false
+}
+
+// addReconnectionAnnotation adds a reconnection annotation to trigger reconciliation
+func (r *GatewayReconciler) addReconnectionAnnotation(ctx context.Context, obj client.Object, routeType string) {
+	if obj.GetAnnotations() == nil {
+		obj.SetAnnotations(make(map[string]string))
+	}
+	annotations := obj.GetAnnotations()
+	annotations["gateway.networking.k8s.io/reconnected-at"] = time.Now().Format(time.RFC3339)
+	obj.SetAnnotations(annotations)
+
+	if err := r.Update(ctx, obj); err != nil {
+		slog.With("function", "addReconnectionAnnotation").Warn("failed to update route annotation",
+			"routeType", routeType,
+			"route", fmt.Sprintf("%s/%s", obj.GetNamespace(), obj.GetName()),
+			"error", err)
+	} else {
+		slog.With("function", "addReconnectionAnnotation").Info("triggered route reconciliation",
+			"routeType", routeType,
+			"route", fmt.Sprintf("%s/%s", obj.GetNamespace(), obj.GetName()))
+	}
+}
+
+// triggerRouteReconciliation triggers reconciliation of all routes referencing this gateway
+func (r *GatewayReconciler) triggerRouteReconciliation(ctx context.Context, gwNamespace, gwName string) {
+	slog.With("function", "triggerRouteReconciliation").Info("triggering route reconciliation after SSH reconnection",
+		"gateway", fmt.Sprintf("%s/%s", gwNamespace, gwName))
+
+	r.triggerHTTPRouteReconciliation(ctx, gwNamespace, gwName)
+	r.triggerTCPRouteReconciliation(ctx, gwNamespace, gwName)
 }
 
 func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -290,6 +437,8 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		// Connection established, sync routes
 		slog.With("function", "Reconcile").Info("SSH connection established/restored")
 		r.syncAllRoutes()
+		// Trigger reconciliation of all routes referencing this gateway
+		r.triggerRouteReconciliation(ctx, req.Namespace, req.Name)
 	}
 
 	var k8sGw gatewayv1.Gateway
@@ -340,11 +489,21 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		})
 
 		// Populate status.addresses with actual assigned addresses from SSH tunnels
+		oldAddresses := k8sGw.Status.Addresses
 		r.updateGatewayAddresses(&k8sGw)
 
-		if err := r.Status().Update(ctx, &k8sGw); err != nil {
-			slog.With("function", "Reconcile").Error("failed to update Gateway status", "gateway", key, "error", err)
-			return ctrl.Result{}, err
+		// Only update status if addresses have changed
+		if !gatewayAddressesEqual(oldAddresses, k8sGw.Status.Addresses) {
+			slog.With("function", "Reconcile").Debug("gateway addresses changed, updating status",
+				"gateway", key,
+				"oldAddresses", len(oldAddresses),
+				"newAddresses", len(k8sGw.Status.Addresses))
+			if err := r.Status().Update(ctx, &k8sGw); err != nil {
+				slog.With("function", "Reconcile").Error("failed to update Gateway status", "gateway", key, "error", err)
+				return ctrl.Result{}, err
+			}
+		} else {
+			slog.With("function", "Reconcile").Debug("gateway addresses unchanged, skipping status update", "gateway", key)
 		}
 	} else {
 		// Handle deletion
@@ -360,6 +519,37 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// Periodically requeue to check SSH connection health
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
+// gatewayAddressesEqual compares two slices of GatewayStatusAddress for equality.
+// Returns true if both slices contain the same addresses (order-independent).
+func gatewayAddressesEqual(a, b []gatewayv1.GatewayStatusAddress) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	// Create maps for O(n) comparison
+	aMap := make(map[string]gatewayv1.AddressType)
+	for _, addr := range a {
+		addrType := gatewayv1.HostnameAddressType
+		if addr.Type != nil {
+			addrType = *addr.Type
+		}
+		aMap[addr.Value] = addrType
+	}
+
+	for _, addr := range b {
+		addrType := gatewayv1.HostnameAddressType
+		if addr.Type != nil {
+			addrType = *addr.Type
+		}
+		existingType, exists := aMap[addr.Value]
+		if !exists || existingType != addrType {
+			return false
+		}
+	}
+
+	return true
 }
 
 // updateGatewayAddresses populates the Gateway status.addresses field with the actual
