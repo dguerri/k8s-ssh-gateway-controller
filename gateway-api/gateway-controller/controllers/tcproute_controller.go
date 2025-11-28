@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -72,12 +71,11 @@ func (r *TCPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			var notReadyErr *ErrGatewayNotReady
 			var notFoundErr *ErrGatewayNotFound
 			if errors.As(err, &notReadyErr) || errors.As(err, &notFoundErr) {
-				slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Warn("gateway not ready or not found, will retry",
+				slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Warn("gateway not ready or not found, will retry with backoff",
 					"gateway", fmt.Sprintf("%s/%s", routeDetails.gwNamespace, routeDetails.gwName),
 					"error", err.Error())
-				// Requeue with fixed delay to retry when gateway becomes ready
-				// Don't return error to avoid exponential backoff that could delay recovery
-				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+				// Return error to trigger controller-runtime's exponential backoff
+				return ctrl.Result{}, err
 			}
 			slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Error("failed to set route", "error", err)
 			return ctrl.Result{}, err
