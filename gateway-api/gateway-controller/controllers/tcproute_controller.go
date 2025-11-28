@@ -111,7 +111,8 @@ func (r *TCPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 	}
 
-	return ctrl.Result{}, nil
+	// Periodically reconcile to retry failed route attachments and ensure routes are active
+	return ctrl.Result{RequeueAfter: routeReconcilePeriod}, nil
 }
 
 // extractTCPRouteDetails extracts common route details from the resource.

@@ -102,7 +102,8 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 
-	return ctrl.Result{}, nil
+	// Periodically reconcile to retry failed route attachments and ensure routes are active
+	return ctrl.Result{RequeueAfter: routeReconcilePeriod}, nil
 }
 
 // extractHTTPRouteDetails extracts common route details from the resource.
