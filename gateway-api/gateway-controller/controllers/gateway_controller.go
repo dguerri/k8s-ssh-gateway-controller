@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -86,7 +87,8 @@ type SSHTunnelManagerInterface interface {
 	StartForwarding(config sshmgr.ForwardingConfig) error
 	StopForwarding(config *sshmgr.ForwardingConfig) error
 	Stop()
-	WaitConnection() error
+	Connect() error
+	IsConnected() bool
 }
 
 type GatewayReconciler struct {
@@ -223,6 +225,12 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("failed to create SSH manager for gateway controller: %w", err)
 	}
 	r.manager = manager
+	
+	// Try initial connection
+	if err := r.manager.Connect(); err != nil {
+		// Log error but continue - will retry in Reconcile loop
+		slog.With("function", "SetupWithManager").Error("failed to establish initial SSH connection", "error", err)
+	}
 
 	if err := RegisterGatewayClassController(mgr); err != nil {
 		return fmt.Errorf("failed to register GatewayClass controller: %w", err)
@@ -234,9 +242,55 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
+// syncAllRoutes iterates through all known gateways and listeners,
+// re-applying the forwarding configurations to the SSH manager.
+// This is used when the SSH connection is re-established.
+func (r *GatewayReconciler) syncAllRoutes() {
+	r.gatewaysMu.Lock()
+	defer r.gatewaysMu.Unlock()
+
+	slog.With("function", "syncAllRoutes").Info("syncing all routes after reconnection")
+
+	for gwKey, gw := range r.gateways {
+		gw.listenersMu.Lock()
+		for listenerName, l := range gw.listeners {
+			if l.route != nil {
+				slog.With("function", "syncAllRoutes", "gateway", gwKey, "listener", listenerName).Debug("restoring route forwarding")
+				err := r.manager.StartForwarding(sshmgr.ForwardingConfig{
+					RemoteHost:   l.Hostname,
+					RemotePort:   l.Port,
+					InternalHost: l.route.Host,
+					InternalPort: l.route.Port,
+				})
+				if err != nil {
+					// Check if forwarding already exists (might happen if we didn't really lose connection but IsConnected returned false incorrectly, though unlikely)
+					var existsErr *sshmgr.ErrSSHForwardingExists
+					if errors.As(err, &existsErr) {
+						continue
+					}
+					slog.With("function", "syncAllRoutes", "gateway", gwKey, "listener", listenerName).Error("failed to restore forwarding", "error", err)
+				}
+			}
+		}
+		gw.listenersMu.Unlock()
+	}
+}
+
 func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	key := fmt.Sprintf("%s/%s", req.Namespace, req.Name)
 	slog.With("function", "Reconcile").Debug("reconciling Gateway", "gateway", key, "request", req)
+
+	// Check and maintain SSH connection
+	if !r.manager.IsConnected() {
+		slog.With("function", "Reconcile").Info("SSH manager disconnected, attempting to reconnect")
+		if err := r.manager.Connect(); err != nil {
+			slog.With("function", "Reconcile").Error("failed to connect SSH manager", "error", err)
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+		// Connection established, sync routes
+		slog.With("function", "Reconcile").Info("SSH connection established/restored")
+		r.syncAllRoutes()
+	}
 
 	var k8sGw gatewayv1.Gateway
 	if err := r.Get(ctx, req.NamespacedName, &k8sGw); err != nil {
@@ -304,7 +358,8 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	return ctrl.Result{}, nil
+	// Periodically requeue to check SSH connection health
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
 // updateGatewayAddresses populates the Gateway status.addresses field with the actual

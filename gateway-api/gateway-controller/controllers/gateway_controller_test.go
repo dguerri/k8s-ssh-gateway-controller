@@ -232,6 +232,7 @@ func TestUpdateGatewayAddresses_GatewayNotFound(t *testing.T) {
 // Mock SSH Tunnel Manager for testing
 type mockSSHTunnelManager struct {
 	assignedAddrs map[string][]string
+	connected     bool
 }
 
 func (m *mockSSHTunnelManager) GetAssignedAddresses(hostname string, port int) []string {
@@ -249,8 +250,13 @@ func (m *mockSSHTunnelManager) StopForwarding(config *sshmgr.ForwardingConfig) e
 
 func (m *mockSSHTunnelManager) Stop() {}
 
-func (m *mockSSHTunnelManager) WaitConnection() error {
+func (m *mockSSHTunnelManager) Connect() error {
+	m.connected = true
 	return nil
+}
+
+func (m *mockSSHTunnelManager) IsConnected() bool {
+	return true
 }
 
 func forwardingKey(hostname string, port int) string {

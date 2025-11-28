@@ -15,12 +15,10 @@ import (
 const defaultKeyPath = "/ssh/id"
 const defaultSSHServer = "localhost:22"
 const defaultSSHUsername = "tunnel-user"
-const defaultBackoffInterval = 5 * time.Second
 const defaultKeepAliveInterval = 10 * time.Second
 const defaultConnectTimeout = 5 * time.Second
 
 var keyPath = getEnvOrDefault("SSH_PRIVATE_KEY_PATH", defaultKeyPath)
-var backoffInterval = getEnvDurationOrDefault("BACKOFF_INTERVAL", defaultBackoffInterval)
 var keepAliveInterval = getEnvDurationOrDefault("KEEP_ALIVE_INTERVAL", defaultKeepAliveInterval)
 var connectTimeout = getEnvDurationOrDefault("CONNECT_TIMEOUT", defaultConnectTimeout)
 var sshServer = getEnvOrDefault("SSH_SERVER", defaultSSHServer)
@@ -113,7 +111,6 @@ func createSSHManager(ctx context.Context) (*sshmgr.SSHTunnelManager, error) {
 		ConnectTimeout:    connectTimeout,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: keepAliveInterval,
-		BackoffInterval:   backoffInterval,
 		RemoteAddrFunc:    getRemoteAddress,
 	}
 
