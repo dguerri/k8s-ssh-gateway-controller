@@ -225,7 +225,7 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("failed to create SSH manager for gateway controller: %w", err)
 	}
 	r.manager = manager
-	
+
 	// Try initial connection
 	if err := r.manager.Connect(); err != nil {
 		// Log error but continue - will retry in Reconcile loop

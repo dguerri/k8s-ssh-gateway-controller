@@ -146,7 +146,7 @@ func NewSSHTunnelManager(externalCtx context.Context, config *SSHConnectionConfi
 		sshDialFunc:                sshDialFn,
 		netDialFunc:                netDialFn,
 	}
-	
+
 	return m, nil
 }
 
@@ -233,7 +233,7 @@ func (m *SSHTunnelManager) closeClient() {
 	}
 	m.client = nil
 	m.connectionCancel = nil
-	
+
 	// Clear assigned addresses as they are invalid on disconnect
 	m.addrNotifMu.Lock()
 	m.assignedAddrs = make(map[string][]string)
@@ -336,6 +336,7 @@ func (m *SSHTunnelManager) GetAssignedAddresses(remoteHost string, remotePort in
 	}
 	return nil
 }
+
 // IsConnected checks if the SSH client is connected.
 func (m *SSHTunnelManager) IsConnected() bool {
 	m.clientMu.RLock()
@@ -411,7 +412,7 @@ func (m *SSHTunnelManager) sendForwarding(fwd *ForwardingConfig, req ForwardRequ
 		m.addrNotifMu.Lock()
 		m.addrNotifications[key] = notifCh
 		m.addrNotifMu.Unlock()
-		
+
 		defer func() {
 			m.addrNotifMu.Lock()
 			delete(m.addrNotifications, key)
@@ -422,7 +423,7 @@ func (m *SSHTunnelManager) sendForwarding(fwd *ForwardingConfig, req ForwardRequ
 		// Wait for address assignment with timeout
 		verifyCtx, verifyCancel := context.WithTimeout(m.externalCtx, m.addressVerificationTimeout)
 		defer verifyCancel()
-		
+
 		needsVerification := fwd.RemoteHost != "" && fwd.RemoteHost != "0.0.0.0"
 
 		select {
@@ -544,7 +545,7 @@ func (m *SSHTunnelManager) Stop() {
 		}
 	}
 	// Clear forwardings map
-	m.forwardings = make(map[string]*ForwardingConfig) 
+	m.forwardings = make(map[string]*ForwardingConfig)
 
 	m.closeClient()
 
@@ -564,7 +565,7 @@ func (m *SSHTunnelManager) handleChannels() {
 	m.clientMu.RUnlock()
 
 	for {
-		// slog.Debug("waiting for new channels") 
+		// slog.Debug("waiting for new channels")
 		select {
 		case <-connectionCtx.Done():
 			slog.With("function", "handleChannels").Debug("connection context canceled, stopping channel handling")
@@ -722,15 +723,8 @@ func (m *SSHTunnelManager) connectClient() error {
 // It reads from the server's stdout and applies the remoteAddrFunc to extract URIs from the output.
 // This function runs in a goroutine and will stop when the connection context is done.
 func (m *SSHTunnelManager) captureServerOutput() {
-	realClient, ok := m.client.(*ssh.Client)
-	if !ok {
-		slog.With("function", "captureServerOutput").Warn("cannot capture server output, client is not *ssh.Client")
-		return
-	}
-
-	session, err := realClient.NewSession()
+	session, err := m.createSSHSession()
 	if err != nil {
-		slog.With("function", "captureServerOutput").Error("failed to create SSH session", "error", err)
 		return
 	}
 	defer func() {
@@ -750,53 +744,86 @@ func (m *SSHTunnelManager) captureServerOutput() {
 		return
 	}
 
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			select {
-			case <-m.connectionCtx.Done():
-				slog.With("function", "captureServerOutput").Debug("connection context canceled, stopping server output capture")
-				return
-			default:
-				n, err := stdout.Read(buf)
-				if err != nil {
-					if err != io.EOF {
-						slog.With("function", "captureServerOutput", "stream", "stdout").Error("read error", "error", err)
-					}
-					break
-				}
-				if n > 0 {
-					data := string(buf[:n])
-					slog.With("function", "captureServerOutput", "stream", "stdout").Debug(data)
-
-					uris, err := m.remoteAddrFunc(data)
-					if err != nil {
-						slog.With("function", "captureServerOutput", "stream", "stdout").Error("failed to extract URIs from data", "error", err)
-						continue
-					}
-					slog.With("function", "captureServerOutput", "stream", "stdout").Debug("extracted URIs from server output", "uris_count", len(uris))
-					for _, uri := range uris {
-						slog.With("function", "captureServerOutput", "stream", "stdout").Info("extracted URI from server output", "uri", uri)
-					}
-
-					// Notify any waiting goroutines about the extracted URIs
-					if len(uris) > 0 {
-						m.addrNotifMu.Lock()
-						for key, ch := range m.addrNotifications {
-							select {
-							case ch <- uris:
-								slog.With("function", "captureServerOutput").Debug("notified waiter about addresses", "key", key, "uris", uris)
-							default:
-								// Channel full or no receiver, skip
-							}
-						}
-						m.addrNotifMu.Unlock()
-					}
-				}
-			}
-		}
-	}()
+	go m.readServerOutput(stdout)
 
 	<-m.connectionCtx.Done()
 	_ = session.Close() // #nosec G104 -- Cleanup on shutdown, error not actionable
+}
+
+// createSSHSession creates a new SSH session from the current client.
+func (m *SSHTunnelManager) createSSHSession() (*ssh.Session, error) {
+	realClient, ok := m.client.(*ssh.Client)
+	if !ok {
+		slog.With("function", "captureServerOutput").Warn("cannot capture server output, client is not *ssh.Client")
+		return nil, fmt.Errorf("client is not *ssh.Client")
+	}
+
+	session, err := realClient.NewSession()
+	if err != nil {
+		slog.With("function", "captureServerOutput").Error("failed to create SSH session", "error", err)
+		return nil, err
+	}
+
+	return session, nil
+}
+
+// readServerOutput reads and processes output from the SSH server.
+func (m *SSHTunnelManager) readServerOutput(stdout io.Reader) {
+	buf := make([]byte, 4096)
+	for {
+		select {
+		case <-m.connectionCtx.Done():
+			slog.With("function", "captureServerOutput").Debug("connection context canceled, stopping server output capture")
+			return
+		default:
+			n, err := stdout.Read(buf)
+			if err != nil {
+				if err != io.EOF {
+					slog.With("function", "captureServerOutput", "stream", "stdout").Error("read error", "error", err)
+				}
+				return
+			}
+			if n > 0 {
+				m.processServerData(buf[:n])
+			}
+		}
+	}
+}
+
+// processServerData extracts URIs from server output and notifies waiting goroutines.
+func (m *SSHTunnelManager) processServerData(data []byte) {
+	dataStr := string(data)
+	slog.With("function", "captureServerOutput", "stream", "stdout").Debug(dataStr)
+
+	uris, err := m.remoteAddrFunc(dataStr)
+	if err != nil {
+		slog.With("function", "captureServerOutput", "stream", "stdout").Error("failed to extract URIs from data", "error", err)
+		return
+	}
+
+	if len(uris) == 0 {
+		return
+	}
+
+	slog.With("function", "captureServerOutput", "stream", "stdout").Debug("extracted URIs from server output", "uris_count", len(uris))
+	for _, uri := range uris {
+		slog.With("function", "captureServerOutput", "stream", "stdout").Info("extracted URI from server output", "uri", uri)
+	}
+
+	m.notifyURIWaiters(uris)
+}
+
+// notifyURIWaiters sends extracted URIs to all registered notification channels.
+func (m *SSHTunnelManager) notifyURIWaiters(uris []string) {
+	m.addrNotifMu.Lock()
+	defer m.addrNotifMu.Unlock()
+
+	for key, ch := range m.addrNotifications {
+		select {
+		case ch <- uris:
+			slog.With("function", "captureServerOutput").Debug("notified waiter about addresses", "key", key, "uris", uris)
+		default:
+			// Channel full or no receiver, skip
+		}
+	}
 }

@@ -28,7 +28,6 @@ func TestNewSSHTunnelManagerWithInvalidKey(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -55,7 +54,6 @@ func TestNewSSHTunnelManager(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -82,7 +80,6 @@ func TestForwardingManagement(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -145,7 +142,6 @@ func TestKeepAlive(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 80 * time.Millisecond, // Shorter keep alive for testing
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -180,7 +176,6 @@ func TestConnectFailsImmediatelyOnDialError(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   10 * time.Millisecond,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -197,7 +192,7 @@ func TestConnectFailsImmediatelyOnDialError(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected Connect to fail")
 	}
-	
+
 	if sshDialCalledTimes != 1 {
 		t.Fatalf("Expected exactly 1 Dial call, got %d", sshDialCalledTimes)
 	}
@@ -217,7 +212,6 @@ func TestDuplicateForwarding(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -264,7 +258,6 @@ func TestStopForwardingNonExisting(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -307,7 +300,6 @@ func TestCloseStopsForwardings(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -349,7 +341,6 @@ func TestGetAssignedAddresses(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -522,7 +513,6 @@ func TestConnectClientWithHostKeyVerification(t *testing.T) {
 			ConnectTimeout:    5 * time.Second,
 			FwdReqTimeout:     2 * time.Second,
 			KeepAliveInterval: 5 * time.Second,
-			BackoffInterval:   2 * time.Second,
 		}
 
 		manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -561,7 +551,6 @@ func TestConnectClientWithHostKeyVerification(t *testing.T) {
 			ConnectTimeout:    5 * time.Second,
 			FwdReqTimeout:     2 * time.Second,
 			KeepAliveInterval: 5 * time.Second,
-			BackoffInterval:   10 * time.Millisecond,
 		}
 
 		manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -600,7 +589,6 @@ func TestStartForwardingWithoutConnection(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   1 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -608,7 +596,7 @@ func TestStartForwardingWithoutConnection(t *testing.T) {
 		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 	}
 
-	// Do NOT call Connect() here, or call it and expect error. 
+	// Do NOT call Connect() here, or call it and expect error.
 	// The test wants to verify StartForwarding fails if not connected.
 
 	// Try to start forwarding without waiting for connection
@@ -645,7 +633,6 @@ func TestStopForwardingWithoutConnection(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -708,10 +695,7 @@ func TestSendForwardingWithAddressVerification(t *testing.T) {
 			ConnectTimeout:             5 * time.Second,
 			FwdReqTimeout:              2 * time.Second,
 			KeepAliveInterval:          5 * time.Second,
-			BackoffInterval:            2 * time.Second,
 			RemoteAddrFunc:             remoteAddrFunc,
-			MaxForwardingRetries:       3,
-			ForwardingRetryDelay:       10 * time.Millisecond,
 			AddressVerificationTimeout: 200 * time.Millisecond,
 		}
 
@@ -754,7 +738,7 @@ func TestSendForwardingWithAddressVerification(t *testing.T) {
 		}
 	})
 
-	t.Run("verification timeout continues anyway", func(t *testing.T) {
+	t.Run("verification timeout fails for specific hostname", func(t *testing.T) {
 		SetupTest(t)
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -772,10 +756,7 @@ func TestSendForwardingWithAddressVerification(t *testing.T) {
 			ConnectTimeout:             5 * time.Second,
 			FwdReqTimeout:              2 * time.Second,
 			KeepAliveInterval:          5 * time.Second,
-			BackoffInterval:            2 * time.Second,
 			RemoteAddrFunc:             remoteAddrFunc,
-			MaxForwardingRetries:       3,
-			ForwardingRetryDelay:       10 * time.Millisecond,
 			AddressVerificationTimeout: 50 * time.Millisecond,
 		}
 
@@ -796,12 +777,15 @@ func TestSendForwardingWithAddressVerification(t *testing.T) {
 		}
 
 		// Don't send any URIs - let it timeout
-		// The test should complete relatively quickly since we reduced the timeout in the code
+		// For specific hostnames, verification timeout should fail
 
 		err = manager.StartForwarding(fwd)
-		// Should succeed even with timeout (it logs a warning and continues)
-		if err != nil {
-			t.Errorf("Expected forwarding to succeed even with verification timeout, got error: %v", err)
+		// Should fail with timeout for specific hostname
+		if err == nil {
+			t.Error("Expected forwarding to fail with verification timeout for specific hostname")
+		}
+		if err != nil && err.Error() != "timeout waiting for address verification for dev" {
+			t.Errorf("Expected timeout error, got: %v", err)
 		}
 	})
 
@@ -856,10 +840,7 @@ func TestSendForwardingWithAddressVerification(t *testing.T) {
 			ConnectTimeout:             5 * time.Second,
 			FwdReqTimeout:              2 * time.Second,
 			KeepAliveInterval:          5 * time.Second,
-			BackoffInterval:            2 * time.Second,
 			RemoteAddrFunc:             remoteAddrFunc,
-			MaxForwardingRetries:       3, // This field is no longer used in sendForwarding
-			ForwardingRetryDelay:       50 * time.Millisecond,
 			AddressVerificationTimeout: 200 * time.Millisecond,
 		}
 
@@ -926,7 +907,6 @@ func TestSendForwardingRequestTimeout(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     100 * time.Millisecond, // Short timeout
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -982,7 +962,6 @@ func TestSendForwardingRequestDenied(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -1042,7 +1021,6 @@ func TestMonitorConnectionWithFailure(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 50 * time.Millisecond, // Fast keepalive for testing
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -1060,7 +1038,7 @@ func TestMonitorConnectionWithFailure(t *testing.T) {
 	if keepaliveCallCount < 2 {
 		t.Errorf("Expected at least 2 keepalive attempts, got %d", keepaliveCallCount)
 	}
-	
+
 	// Verify connection is closed
 	if manager.IsConnected() {
 		t.Error("Expected manager to be disconnected after keepalive failure")
@@ -1114,10 +1092,7 @@ func TestWildcardForwardingStoresAddresses(t *testing.T) {
 		ConnectTimeout:             5 * time.Second,
 		FwdReqTimeout:              2 * time.Second,
 		KeepAliveInterval:          5 * time.Second,
-		BackoffInterval:            2 * time.Second,
 		RemoteAddrFunc:             remoteAddrFunc,
-		MaxForwardingRetries:       3,
-		ForwardingRetryDelay:       10 * time.Millisecond,
 		AddressVerificationTimeout: 200 * time.Millisecond,
 	}
 
@@ -1200,10 +1175,7 @@ func TestEmptyHostnameForwardingStoresAddresses(t *testing.T) {
 		ConnectTimeout:             5 * time.Second,
 		FwdReqTimeout:              2 * time.Second,
 		KeepAliveInterval:          5 * time.Second,
-		BackoffInterval:            2 * time.Second,
 		RemoteAddrFunc:             remoteAddrFunc,
-		MaxForwardingRetries:       3,
-		ForwardingRetryDelay:       10 * time.Millisecond,
 		AddressVerificationTimeout: 200 * time.Millisecond,
 	}
 
@@ -1238,4 +1210,3 @@ func TestEmptyHostnameForwardingStoresAddresses(t *testing.T) {
 		t.Errorf("Expected assigned addresses http://example.com and https://example.com, got: %v", addrs)
 	}
 }
-

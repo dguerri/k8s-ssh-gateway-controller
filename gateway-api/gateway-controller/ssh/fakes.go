@@ -24,7 +24,7 @@ func (a *fakeAddr) Network() string { return "tcp" }
 func (a *fakeAddr) String() string { return "" }
 
 // fakeNetConn represents a fake network connection.
-type fakeNetConn struct{
+type fakeNetConn struct {
 	readOnce sync.Once
 }
 

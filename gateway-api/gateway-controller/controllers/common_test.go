@@ -20,7 +20,6 @@ func TestMain(m *testing.M) {
 	originalSSHUsername := sshUsername
 	originalConnectTimeout := connectTimeout
 	originalKeepAliveInterval := keepAliveInterval
-	originalBackoffInterval := backoffInterval
 
 	// Set test variables
 	keyPath = "valid-key-path"
@@ -28,7 +27,6 @@ func TestMain(m *testing.M) {
 	sshUsername = "test-user"
 	connectTimeout = 5 * time.Second
 	keepAliveInterval = 10 * time.Second
-	backoffInterval = 2 * time.Second
 
 	osReadFile = func(path string) ([]byte, error) {
 		if path == "valid-key-path" {
@@ -58,7 +56,6 @@ LWdlbmVyYXRlZC1rZXkBAgME
 	sshUsername = originalSSHUsername
 	connectTimeout = originalConnectTimeout
 	keepAliveInterval = originalKeepAliveInterval
-	backoffInterval = originalBackoffInterval
 
 	// Exit with the test result code
 	os.Exit(code)
