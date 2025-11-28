@@ -18,7 +18,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	sshmgr "github.com/dguerri/ssh-gateway-api-controller/ssh"
 )
@@ -102,6 +101,15 @@ type GatewayReconciler struct {
 	gatewaysMu sync.Mutex
 }
 
+// isRouteAlreadyAttached checks if the route is already correctly attached to the listener
+func isRouteAlreadyAttached(l *Listener, routeName, routeNamespace, backendHost string, backendPort int) bool {
+	return l.route != nil &&
+		l.route.Name == routeName &&
+		l.route.Namespace == routeNamespace &&
+		l.route.Host == backendHost &&
+		l.route.Port == backendPort
+}
+
 // SetRoute sets up forwarding for a specific route on a listener.
 func (r *GatewayReconciler) SetRoute(ctx context.Context, gwNamespace, gwName, listenerName, routeName, routeNamespace, backendHost string, backendPort int) error {
 	r.gatewaysMu.Lock()
@@ -131,8 +139,21 @@ func (r *GatewayReconciler) SetRoute(ctx context.Context, gwNamespace, gwName, l
 			"listener", listenerName,
 			"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
 			"hasExistingRoute", l.route != nil)
+
+		// Check if route is already correctly attached (idempotency for periodic reconciliation)
+		if isRouteAlreadyAttached(l, routeName, routeNamespace, backendHost, backendPort) {
+			slog.With("function", "SetRoute").Debug("route already correctly attached, nothing to do",
+				"gateway", gwKey,
+				"route", fmt.Sprintf("%s/%s", routeNamespace, routeName))
+			return nil
+		}
+
 		if l.route != nil {
-			// Stop the forwarding.
+			// Stop the existing forwarding (different route or different backend)
+			slog.With("function", "SetRoute").Debug("stopping existing route forwarding",
+				"gateway", gwKey,
+				"oldRoute", fmt.Sprintf("%s/%s", l.route.Namespace, l.route.Name),
+				"newRoute", fmt.Sprintf("%s/%s", routeNamespace, routeName))
 			err := r.manager.StopForwarding(&sshmgr.ForwardingConfig{
 				RemoteHost:   l.Hostname,
 				RemotePort:   l.Port,
@@ -169,12 +190,25 @@ func (r *GatewayReconciler) SetRoute(ctx context.Context, gwNamespace, gwName, l
 		})
 		if err != nil {
 			var notReadyErr *sshmgr.ErrSSHClientNotReady
+			var existsErr *sshmgr.ErrSSHForwardingExists
+
 			if errors.As(err, &notReadyErr) {
 				slog.With("function", "SetRoute").Warn("SSH client became not ready during forwarding",
 					"gateway", gwKey,
 					"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
 					"error", err)
 				return &ErrGatewayNotReady{msg: err.Error()}
+			} else if errors.As(err, &existsErr) {
+				// Forwarding already exists (controller restart case)
+				// SSH manager still has the forwarding but internal state was lost
+				// Adopt the existing forwarding by populating internal state
+				slog.With("function", "SetRoute").Info("forwarding already exists, adopting it",
+					"gateway", gwKey,
+					"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
+					"listener", listenerName)
+				l.route = &route
+				// Don't update Gateway status here - will be done by periodic reconciliation
+				return nil
 			}
 			slog.With("function", "SetRoute").Error("failed to start forwarding",
 				"gateway", gwKey,
@@ -347,82 +381,6 @@ func (r *GatewayReconciler) syncAllRoutes() {
 		"listenersWithoutRoutes", listenersWithoutRoutes)
 }
 
-// triggerHTTPRouteReconciliation triggers reconciliation of HTTPRoutes referencing the gateway
-func (r *GatewayReconciler) triggerHTTPRouteReconciliation(ctx context.Context, gwNamespace, gwName string) {
-	var httpRoutes gatewayv1.HTTPRouteList
-	if err := r.List(ctx, &httpRoutes, client.InNamespace(gwNamespace)); err != nil {
-		slog.With("function", "triggerHTTPRouteReconciliation").Error("failed to list HTTPRoutes", "error", err)
-		return
-	}
-
-	for i := range httpRoutes.Items {
-		route := &httpRoutes.Items[i]
-		if r.routeReferencesGateway(route.Spec.ParentRefs, gwNamespace, gwName) {
-			r.addReconnectionAnnotation(ctx, route, "HTTPRoute")
-		}
-	}
-}
-
-// triggerTCPRouteReconciliation triggers reconciliation of TCPRoutes referencing the gateway
-func (r *GatewayReconciler) triggerTCPRouteReconciliation(ctx context.Context, gwNamespace, gwName string) {
-	var tcpRoutes gatewayv1alpha2.TCPRouteList
-	if err := r.List(ctx, &tcpRoutes, client.InNamespace(gwNamespace)); err != nil {
-		slog.With("function", "triggerTCPRouteReconciliation").Error("failed to list TCPRoutes", "error", err)
-		return
-	}
-
-	for i := range tcpRoutes.Items {
-		route := &tcpRoutes.Items[i]
-		if r.routeReferencesGateway(route.Spec.ParentRefs, gwNamespace, gwName) {
-			r.addReconnectionAnnotation(ctx, route, "TCPRoute")
-		}
-	}
-}
-
-// routeReferencesGateway checks if any parentRef references the specified gateway
-func (r *GatewayReconciler) routeReferencesGateway(parentRefs []gatewayv1.ParentReference, gwNamespace, gwName string) bool {
-	for _, parentRef := range parentRefs {
-		parentNs := gwNamespace
-		if parentRef.Namespace != nil {
-			parentNs = string(*parentRef.Namespace)
-		}
-		if string(parentRef.Name) == gwName && parentNs == gwNamespace {
-			return true
-		}
-	}
-	return false
-}
-
-// addReconnectionAnnotation adds a reconnection annotation to trigger reconciliation
-func (r *GatewayReconciler) addReconnectionAnnotation(ctx context.Context, obj client.Object, routeType string) {
-	if obj.GetAnnotations() == nil {
-		obj.SetAnnotations(make(map[string]string))
-	}
-	annotations := obj.GetAnnotations()
-	annotations["gateway.networking.k8s.io/reconnected-at"] = time.Now().Format(time.RFC3339)
-	obj.SetAnnotations(annotations)
-
-	if err := r.Update(ctx, obj); err != nil {
-		slog.With("function", "addReconnectionAnnotation").Warn("failed to update route annotation",
-			"routeType", routeType,
-			"route", fmt.Sprintf("%s/%s", obj.GetNamespace(), obj.GetName()),
-			"error", err)
-	} else {
-		slog.With("function", "addReconnectionAnnotation").Info("triggered route reconciliation",
-			"routeType", routeType,
-			"route", fmt.Sprintf("%s/%s", obj.GetNamespace(), obj.GetName()))
-	}
-}
-
-// triggerRouteReconciliation triggers reconciliation of all routes referencing this gateway
-func (r *GatewayReconciler) triggerRouteReconciliation(ctx context.Context, gwNamespace, gwName string) {
-	slog.With("function", "triggerRouteReconciliation").Info("triggering route reconciliation after SSH reconnection",
-		"gateway", fmt.Sprintf("%s/%s", gwNamespace, gwName))
-
-	r.triggerHTTPRouteReconciliation(ctx, gwNamespace, gwName)
-	r.triggerTCPRouteReconciliation(ctx, gwNamespace, gwName)
-}
-
 func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	key := fmt.Sprintf("%s/%s", req.Namespace, req.Name)
 	slog.With("function", "Reconcile").Debug("reconciling Gateway", "gateway", key, "request", req)
@@ -434,11 +392,11 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			slog.With("function", "Reconcile").Error("failed to connect SSH manager", "error", err)
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
-		// Connection established, sync routes
+		// Connection established, sync routes that are already in internal state
 		slog.With("function", "Reconcile").Info("SSH connection established/restored")
 		r.syncAllRoutes()
-		// Trigger reconciliation of all routes referencing this gateway
-		r.triggerRouteReconciliation(ctx, req.Namespace, req.Name)
+		// Note: Routes will reconcile on their own periodic schedule (ROUTE_RECONCILE_PERIOD)
+		// and retry attachment when they detect the gateway is ready
 	}
 
 	var k8sGw gatewayv1.Gateway
@@ -517,8 +475,8 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	// Periodically requeue to check SSH connection health
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	// Periodically requeue to check SSH connection health and update status
+	return ctrl.Result{RequeueAfter: gatewayReconcilePeriod}, nil
 }
 
 // gatewayAddressesEqual compares two slices of GatewayStatusAddress for equality.
@@ -679,9 +637,16 @@ func (r *GatewayReconciler) handleAddOrUpdateGateway(ctx context.Context, k8sGw 
 							slog.With("function", "handleAddOrUpdateGateway").Error("failed to stop existing forwarding", "listener", listenerName, "error", err)
 						}
 					}
+					// Configuration changed - use new listener
+					updatedListeners[listenerName] = listener
+				} else {
+					// Configuration unchanged - preserve existing listener (keeps route reference)
+					updatedListeners[listenerName] = existing
 				}
+			} else {
+				// New listener - add it
+				updatedListeners[listenerName] = listener
 			}
-			updatedListeners[listenerName] = listener
 		}
 
 		gw.listeners = updatedListeners
