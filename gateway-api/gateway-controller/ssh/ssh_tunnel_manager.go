@@ -95,7 +95,7 @@ type SSHTunnelManager struct {
 	keepAliveInterval          time.Duration
 	addressVerificationTimeout time.Duration
 	clientMu                   sync.RWMutex
-	addrNotifMu                sync.Mutex
+	addrNotifMu                sync.RWMutex
 	connected                  bool
 }
 
@@ -346,8 +346,8 @@ func (m *SSHTunnelManager) StopForwarding(fwd *ForwardingConfig) error {
 // Returns nil if no addresses have been assigned yet or the forwarding doesn't exist.
 func (m *SSHTunnelManager) GetAssignedAddresses(remoteHost string, remotePort int) []string {
 	key := forwardingKey(remoteHost, remotePort)
-	m.addrNotifMu.Lock()
-	defer m.addrNotifMu.Unlock()
+	m.addrNotifMu.RLock()
+	defer m.addrNotifMu.RUnlock()
 
 	if addrs, ok := m.assignedAddrs[key]; ok {
 		// Return a copy to avoid race conditions
@@ -836,10 +836,16 @@ func (m *SSHTunnelManager) processServerData(data []byte) {
 
 // notifyURIWaiters sends extracted URIs to all registered notification channels.
 func (m *SSHTunnelManager) notifyURIWaiters(uris []string) {
-	m.addrNotifMu.Lock()
-	defer m.addrNotifMu.Unlock()
-
+	// Copy channels under read lock to avoid holding lock during I/O
+	m.addrNotifMu.RLock()
+	channels := make(map[string]chan []string, len(m.addrNotifications))
 	for key, ch := range m.addrNotifications {
+		channels[key] = ch
+	}
+	m.addrNotifMu.RUnlock()
+
+	// Send to channels outside the lock
+	for key, ch := range channels {
 		select {
 		case ch <- uris:
 			slog.With("function", "captureServerOutput").Debug("notified waiter about addresses", "key", key, "uris", uris)

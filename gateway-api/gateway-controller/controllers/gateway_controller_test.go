@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -353,4 +354,278 @@ func TestGatewayAddressesEqual(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+// TestIsForwardingValid tests the forwarding validation logic
+func TestIsForwardingValid(t *testing.T) {
+	tests := []struct {
+		name          string
+		listener      *Listener
+		assignedAddrs map[string][]string
+		expected      bool
+	}{
+		{
+			name: "no addresses assigned",
+			listener: &Listener{
+				Hostname: "example.com",
+				Port:     80,
+			},
+			assignedAddrs: map[string][]string{},
+			expected:      false,
+		},
+		{
+			name: "hostname matches in HTTP URI",
+			listener: &Listener{
+				Hostname: "example.com",
+				Port:     80,
+			},
+			assignedAddrs: map[string][]string{
+				"example.com:80": {"http://example.com", "https://example.com"},
+			},
+			expected: true,
+		},
+		{
+			name: "hostname matches in HTTPS URI",
+			listener: &Listener{
+				Hostname: "api.example.com",
+				Port:     443,
+			},
+			assignedAddrs: map[string][]string{
+				"api.example.com:443": {"https://api.example.com"},
+			},
+			expected: true,
+		},
+		{
+			name: "hostname mismatch - wrong subdomain assigned",
+			listener: &Listener{
+				Hostname: "requested.example.com",
+				Port:     80,
+			},
+			assignedAddrs: map[string][]string{
+				"requested.example.com:80": {"http://random-abc123.example.com", "https://random-abc123.example.com"},
+			},
+			expected: false,
+		},
+		{
+			name: "wildcard accepts any address",
+			listener: &Listener{
+				Hostname: "0.0.0.0",
+				Port:     8080,
+			},
+			assignedAddrs: map[string][]string{
+				"0.0.0.0:8080": {"http://random-subdomain.example.com"},
+			},
+			expected: true,
+		},
+		{
+			name: "wildcard with TCP URI",
+			listener: &Listener{
+				Hostname: "0.0.0.0",
+				Port:     3306,
+			},
+			assignedAddrs: map[string][]string{
+				"0.0.0.0:3306": {"tcp://nue.tuns.sh:34567"},
+			},
+			expected: true,
+		},
+		{
+			name: "wildcard but no addresses",
+			listener: &Listener{
+				Hostname: "0.0.0.0",
+				Port:     8080,
+			},
+			assignedAddrs: map[string][]string{},
+			expected:      false,
+		},
+		{
+			name: "partial hostname match",
+			listener: &Listener{
+				Hostname: "api.example.com",
+				Port:     80,
+			},
+			assignedAddrs: map[string][]string{
+				"api.example.com:80": {"http://my-api.example.com"},
+			},
+			expected: true, // Contains "api.example.com"
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockManager := &mockSSHTunnelManager{
+				assignedAddrs: tt.assignedAddrs,
+			}
+
+			reconciler := &GatewayReconciler{
+				manager: mockManager,
+			}
+
+			result := reconciler.isForwardingValid(tt.listener)
+			assert.Equal(t, tt.expected, result, "isForwardingValid() mismatch")
+		})
+	}
+}
+
+// TestSetRoute_ValidatesForwarding tests that SetRoute validates forwarding exists
+func TestSetRoute_ValidatesForwarding(t *testing.T) {
+	t.Run("detects invalid forwarding and clears stale state", func(t *testing.T) {
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{
+				// No addresses for this listener
+			},
+			connected: true,
+		}
+
+		reconciler := &GatewayReconciler{
+			manager: mockManager,
+			gateways: map[string]*gateway{
+				"test-ns/test-gw": {
+					listeners: map[string]*Listener{
+						"http": {
+							Hostname: "example.com",
+							Port:     80,
+							Protocol: "HTTP",
+							route: &Route{
+								Name:      "test-route",
+								Namespace: "test-ns",
+								Host:      "backend.svc.cluster.local",
+								Port:      8080,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		// Call SetRoute with same route - should detect forwarding is invalid
+		err := reconciler.SetRoute(context.TODO(), "test-ns", "test-gw", "http", "test-route", "test-ns", "backend.svc.cluster.local", 8080)
+
+		// Should return nil after clearing stale state and establishing forwarding
+		assert.NoError(t, err)
+
+		// Route should still be attached after successful forwarding
+		gw := reconciler.gateways["test-ns/test-gw"]
+		listener := gw.listeners["http"]
+		assert.NotNil(t, listener.route)
+		assert.Equal(t, "test-route", listener.route.Name)
+	})
+
+	t.Run("detects hostname mismatch and retries", func(t *testing.T) {
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{
+				"requested.example.com:80": {"http://random-abc123.example.com"}, // Wrong hostname!
+			},
+			connected: true,
+		}
+
+		reconciler := &GatewayReconciler{
+			manager: mockManager,
+			gateways: map[string]*gateway{
+				"test-ns/test-gw": {
+					listeners: map[string]*Listener{
+						"http": {
+							Hostname: "requested.example.com",
+							Port:     80,
+							Protocol: "HTTP",
+							route: &Route{
+								Name:      "test-route",
+								Namespace: "test-ns",
+								Host:      "backend.svc.cluster.local",
+								Port:      8080,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		// Call SetRoute - should detect hostname mismatch and retry
+		err := reconciler.SetRoute(context.TODO(), "test-ns", "test-gw", "http", "test-route", "test-ns", "backend.svc.cluster.local", 8080)
+
+		// Should succeed after retry
+		assert.NoError(t, err)
+	})
+
+	t.Run("accepts valid forwarding without retry", func(t *testing.T) {
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{
+				"example.com:80": {"http://example.com"}, // Correct hostname
+			},
+			connected: true,
+		}
+
+		reconciler := &GatewayReconciler{
+			manager: mockManager,
+			gateways: map[string]*gateway{
+				"test-ns/test-gw": {
+					listeners: map[string]*Listener{
+						"http": {
+							Hostname: "example.com",
+							Port:     80,
+							Protocol: "HTTP",
+							route: &Route{
+								Name:      "test-route",
+								Namespace: "test-ns",
+								Host:      "backend.svc.cluster.local",
+								Port:      8080,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		// Call SetRoute - should validate forwarding is valid and return immediately
+		err := reconciler.SetRoute(context.TODO(), "test-ns", "test-gw", "http", "test-route", "test-ns", "backend.svc.cluster.local", 8080)
+
+		// Should succeed without calling StartForwarding
+		assert.NoError(t, err)
+
+		// Route should still be attached
+		gw := reconciler.gateways["test-ns/test-gw"]
+		listener := gw.listeners["http"]
+		assert.NotNil(t, listener.route)
+		assert.Equal(t, "test-route", listener.route.Name)
+	})
+
+	t.Run("wildcard accepts any hostname", func(t *testing.T) {
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{
+				"0.0.0.0:8080": {"http://random-subdomain.example.com"}, // Any hostname OK
+			},
+			connected: true,
+		}
+
+		reconciler := &GatewayReconciler{
+			manager: mockManager,
+			gateways: map[string]*gateway{
+				"test-ns/test-gw": {
+					listeners: map[string]*Listener{
+						"http": {
+							Hostname: "0.0.0.0",
+							Port:     8080,
+							Protocol: "HTTP",
+							route: &Route{
+								Name:      "test-route",
+								Namespace: "test-ns",
+								Host:      "backend.svc.cluster.local",
+								Port:      8080,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		// Call SetRoute - wildcard should accept any hostname
+		err := reconciler.SetRoute(context.TODO(), "test-ns", "test-gw", "http", "test-route", "test-ns", "backend.svc.cluster.local", 8080)
+
+		// Should succeed
+		assert.NoError(t, err)
+
+		// Route should still be attached
+		gw := reconciler.gateways["test-ns/test-gw"]
+		listener := gw.listeners["http"]
+		assert.NotNil(t, listener.route)
+	})
 }

@@ -134,6 +134,93 @@ func (r *GatewayReconciler) isForwardingValid(l *Listener) bool {
 	return true
 }
 
+// setupRouteForwarding handles the actual forwarding setup for a route.
+// This includes stopping any existing forwarding and starting the new one.
+func (r *GatewayReconciler) setupRouteForwarding(l *Listener, gwKey, routeName, routeNamespace, backendHost string, backendPort int, listenerName string) error {
+	// Stop existing forwarding if present
+	if l.route != nil {
+		slog.With("function", "setupRouteForwarding").Debug("stopping existing route forwarding",
+			"gateway", gwKey,
+			"oldRoute", fmt.Sprintf("%s/%s", l.route.Namespace, l.route.Name),
+			"newRoute", fmt.Sprintf("%s/%s", routeNamespace, routeName))
+		err := r.manager.StopForwarding(&sshmgr.ForwardingConfig{
+			RemoteHost:   l.Hostname,
+			RemotePort:   l.Port,
+			InternalHost: l.route.Host,
+			InternalPort: l.route.Port,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to stop forwarding: %w", err)
+		}
+	}
+
+	// Create new route
+	route := Route{
+		Name:      routeName,
+		Namespace: routeNamespace,
+		Host:      backendHost,
+		Port:      backendPort,
+	}
+
+	// Check SSH connection status
+	if !r.manager.IsConnected() {
+		slog.With("function", "setupRouteForwarding").Warn("SSH manager is not connected, cannot start forwarding",
+			"gateway", gwKey,
+			"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
+			"listener", listenerName)
+		return &ErrGatewayNotReady{msg: "SSH client not connected"}
+	}
+
+	// Start forwarding
+	err := r.manager.StartForwarding(sshmgr.ForwardingConfig{
+		RemoteHost:   l.Hostname,
+		RemotePort:   l.Port,
+		InternalHost: route.Host,
+		InternalPort: route.Port,
+	})
+	if err != nil {
+		return r.handleForwardingError(err, l, &route, gwKey, routeName, routeNamespace, listenerName)
+	}
+
+	// Success - update internal state
+	l.route = &route
+	slog.With("function", "setupRouteForwarding", "gateway", gwKey, "listener", listenerName).Info("route set successfully",
+		"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
+		"backend", fmt.Sprintf("%s:%d", backendHost, backendPort))
+	return nil
+}
+
+// handleForwardingError processes errors from StartForwarding.
+func (r *GatewayReconciler) handleForwardingError(err error, l *Listener, route *Route, gwKey, routeName, routeNamespace, listenerName string) error {
+	var notReadyErr *sshmgr.ErrSSHClientNotReady
+	var existsErr *sshmgr.ErrSSHForwardingExists
+
+	if errors.As(err, &notReadyErr) {
+		slog.With("function", "setupRouteForwarding").Warn("SSH client became not ready during forwarding",
+			"gateway", gwKey,
+			"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
+			"error", err)
+		return &ErrGatewayNotReady{msg: err.Error()}
+	}
+
+	if errors.As(err, &existsErr) {
+		// Forwarding already exists (controller restart case) - adopt it
+		slog.With("function", "setupRouteForwarding").Info("forwarding already exists, adopting it",
+			"gateway", gwKey,
+			"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
+			"listener", listenerName)
+		l.route = route
+		return nil
+	}
+
+	slog.With("function", "setupRouteForwarding").Error("failed to start forwarding",
+		"gateway", gwKey,
+		"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
+		"listener", listenerName,
+		"error", err)
+	return fmt.Errorf("failed to start forwarding: %w", err)
+}
+
 // SetRoute sets up forwarding for a specific route on a listener.
 func (r *GatewayReconciler) SetRoute(ctx context.Context, gwNamespace, gwName, listenerName, routeName, routeNamespace, backendHost string, backendPort int) error {
 	r.gatewaysMu.Lock()
@@ -181,89 +268,22 @@ func (r *GatewayReconciler) SetRoute(ctx context.Context, gwNamespace, gwName, l
 			}
 		}
 
-		if l.route != nil {
-			// Stop the existing forwarding (different route or different backend)
-			slog.With("function", "SetRoute").Debug("stopping existing route forwarding",
-				"gateway", gwKey,
-				"oldRoute", fmt.Sprintf("%s/%s", l.route.Namespace, l.route.Name),
-				"newRoute", fmt.Sprintf("%s/%s", routeNamespace, routeName))
-			err := r.manager.StopForwarding(&sshmgr.ForwardingConfig{
-				RemoteHost:   l.Hostname,
-				RemotePort:   l.Port,
-				InternalHost: l.route.Host,
-				InternalPort: l.route.Port,
-			})
-			if err != nil {
-				return fmt.Errorf("failed to stop forwarding: %w", err)
-			}
-		}
-		// Start the forwarding.
-		route := Route{
-			Name:      routeName,
-			Namespace: routeNamespace,
-			Host:      backendHost,
-			Port:      backendPort,
-		}
-
-		// Check SSH connection status before attempting to start forwarding
-		connected := r.manager.IsConnected()
-		if !connected {
-			slog.With("function", "SetRoute").Warn("SSH manager is not connected, cannot start forwarding",
-				"gateway", gwKey,
-				"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
-				"listener", listenerName)
-			return &ErrGatewayNotReady{msg: "SSH client not connected"}
-		}
-
-		err := r.manager.StartForwarding(sshmgr.ForwardingConfig{
-			RemoteHost:   l.Hostname,
-			RemotePort:   l.Port,
-			InternalHost: route.Host,
-			InternalPort: route.Port,
-		})
+		// Setup forwarding for the route
+		err := r.setupRouteForwarding(l, gwKey, routeName, routeNamespace, backendHost, backendPort, listenerName)
 		if err != nil {
-			var notReadyErr *sshmgr.ErrSSHClientNotReady
-			var existsErr *sshmgr.ErrSSHForwardingExists
-
-			if errors.As(err, &notReadyErr) {
-				slog.With("function", "SetRoute").Warn("SSH client became not ready during forwarding",
-					"gateway", gwKey,
-					"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
-					"error", err)
-				return &ErrGatewayNotReady{msg: err.Error()}
-			} else if errors.As(err, &existsErr) {
-				// Forwarding already exists (controller restart case)
-				// SSH manager still has the forwarding but internal state was lost
-				// Adopt the existing forwarding by populating internal state
-				slog.With("function", "SetRoute").Info("forwarding already exists, adopting it",
-					"gateway", gwKey,
-					"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
-					"listener", listenerName)
-				l.route = &route
-				// Don't update Gateway status here - will be done by periodic reconciliation
-				return nil
-			}
-			slog.With("function", "SetRoute").Error("failed to start forwarding",
-				"gateway", gwKey,
-				"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
-				"listener", listenerName,
-				"error", err)
-			return fmt.Errorf("failed to start forwarding: %w", err)
+			return err
 		}
-		// Forwarding is set, add the new route
-		l.route = &route
-		slog.With("function", "SetRoute", "gateway", gwNamespace+"/"+gwName, "listener", listenerName).Info("route set successfully",
-			"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
-			"backend", fmt.Sprintf("%s:%d", backendHost, backendPort))
 
 		// Release locks before updating Gateway status to avoid holding locks during K8s API call
 		gw.listenersMu.Unlock()
 		r.gatewaysMu.Unlock()
 
-		// Update Gateway status with assigned addresses
-		if err := r.updateGatewayStatus(ctx, gwNamespace, gwName); err != nil {
-			slog.With("function", "SetRoute", "gateway", gwNamespace+"/"+gwName).Warn("failed to update Gateway status", "error", err)
-			// Don't return error - forwarding is already set up successfully
+		// Update Gateway status with assigned addresses (skip if no Kubernetes client, e.g. in tests)
+		if ctx != nil && r.Client != nil {
+			if err := r.updateGatewayStatus(ctx, gwNamespace, gwName); err != nil {
+				slog.With("function", "SetRoute", "gateway", gwNamespace+"/"+gwName).Warn("failed to update Gateway status", "error", err)
+				// Don't return error - forwarding is already set up successfully
+			}
 		}
 
 		// Reacquire locks before defers execute
@@ -316,10 +336,12 @@ func (r *GatewayReconciler) RemoveRoute(ctx context.Context, gwNamespace, gwName
 		gw.listenersMu.Unlock()
 		r.gatewaysMu.Unlock()
 
-		// Update Gateway status to remove addresses (if no other routes use them)
-		if err := r.updateGatewayStatus(ctx, gwNamespace, gwName); err != nil {
-			slog.With("function", "RemoveRoute", "gateway", gwNamespace+"/"+gwName).Warn("failed to update Gateway status", "error", err)
-			// Don't return error - forwarding is already stopped successfully
+		// Update Gateway status to remove addresses (skip if no Kubernetes client, e.g. in tests)
+		if ctx != nil && r.Client != nil {
+			if err := r.updateGatewayStatus(ctx, gwNamespace, gwName); err != nil {
+				slog.With("function", "RemoveRoute", "gateway", gwNamespace+"/"+gwName).Warn("failed to update Gateway status", "error", err)
+				// Don't return error - forwarding is already stopped successfully
+			}
 		}
 
 		// Reacquire locks before defers execute
