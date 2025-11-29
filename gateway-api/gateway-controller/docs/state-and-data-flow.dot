@@ -1,0 +1,200 @@
+digraph StateAndDataFlow {
+    // Graph settings
+    rankdir=LR;
+    compound=true;
+    splines=ortho;
+    nodesep=0.8;
+    ranksep=1.5;
+
+    // Style definitions
+    node [shape=box, style="rounded,filled", fontname="Arial", fontsize=11];
+    edge [fontname="Arial", fontsize=9];
+
+    // ========================================
+    // STATE STORES
+    // ========================================
+
+    subgraph cluster_gateway_state {
+        label="Gateway Controller State";
+        style=filled;
+        color="#C8E6C9";
+
+        gateways_map [label=<
+            <table border="0" cellborder="1" cellspacing="0" cellpadding="6">
+                <tr><td bgcolor="#A5D6A7"><b>gateways map</b></td></tr>
+                <tr><td>key: namespace/name<br/>value: Gateway struct</td></tr>
+                <tr><td><font point-size="9">Protected by: gatewaysMu</font></td></tr>
+            </table>
+        >, shape=plaintext];
+
+        listeners_map [label=<
+            <table border="0" cellborder="1" cellspacing="0" cellpadding="6">
+                <tr><td bgcolor="#A5D6A7"><b>listeners map</b></td></tr>
+                <tr><td>key: listener name<br/>value: Listener struct</td></tr>
+                <tr><td><font point-size="9">Protected by: listenersMu</font></td></tr>
+            </table>
+        >, shape=plaintext];
+
+        route_state [label=<
+            <table border="0" cellborder="1" cellspacing="0" cellpadding="6">
+                <tr><td bgcolor="#A5D6A7"><b>route field (in Listener)</b></td></tr>
+                <tr><td>• Name, Namespace<br/>• Backend Host:Port</td></tr>
+                <tr><td><font point-size="9">nil = no route attached<br/>non-nil = route attached</font></td></tr>
+            </table>
+        >, shape=plaintext];
+
+        gateways_map -> listeners_map [label="contains", style=dotted];
+        listeners_map -> route_state [label="contains", style=dotted];
+    }
+
+    subgraph cluster_ssh_state {
+        label="SSH Manager State";
+        style=filled;
+        color="#FFE0B2";
+
+        forwardings_map [label=<
+            <table border="0" cellborder="1" cellspacing="0" cellpadding="6">
+                <tr><td bgcolor="#FFCC80"><b>forwardings map</b></td></tr>
+                <tr><td>key: remoteHost:remotePort<br/>value: ForwardingConfig</td></tr>
+                <tr><td><font point-size="9">What we REQUESTED</font></td></tr>
+                <tr><td><font point-size="9">Protected by: clientMu</font></td></tr>
+            </table>
+        >, shape=plaintext];
+
+        assigned_map [label=<
+            <table border="0" cellborder="1" cellspacing="0" cellpadding="6">
+                <tr><td bgcolor="#FFCC80"><b>assignedAddrs map</b></td></tr>
+                <tr><td>key: remoteHost:remotePort<br/>value: []string (URIs)</td></tr>
+                <tr><td><font point-size="9">What server ASSIGNED<br/>e.g., ["http://xyz.tuns.sh"]</font></td></tr>
+                <tr><td><font point-size="9">Protected by: addrNotifMu (RWMutex)</font></td></tr>
+            </table>
+        >, shape=plaintext];
+
+        ssh_client [label=<
+            <table border="0" cellborder="1" cellspacing="0" cellpadding="6">
+                <tr><td bgcolor="#FFCC80"><b>client (*ssh.Client)</b></td></tr>
+                <tr><td>nil = disconnected<br/>non-nil = connected</td></tr>
+                <tr><td><font point-size="9">Protected by: clientMu</font></td></tr>
+            </table>
+        >, shape=plaintext];
+
+        forwardings_map -> assigned_map [label="paired", style=dotted, dir=both];
+    }
+
+    // ========================================
+    // SCENARIO 1: Normal Route Setup
+    // ========================================
+
+    subgraph cluster_scenario1 {
+        label="Scenario 1: Normal Route Setup";
+        style=filled;
+        color="#E3F2FD";
+
+        s1_1 [label="1. HTTPRoute created\nin Kubernetes", fillcolor="#BBDEFB"];
+        s1_2 [label="2. HTTPRoute.Reconcile()\ntriggers", fillcolor="#BBDEFB"];
+        s1_3 [label="3. GW.SetRoute() called\nwith route details", fillcolor="#90CAF9"];
+        s1_4 [label="4. Check isForwardingValid()\nreturns false (new route)", fillcolor="#90CAF9"];
+        s1_5 [label="5. SSH.StartForwarding()\ncalled", fillcolor="#FFB74D"];
+        s1_6 [label="6. Add to forwardings map\nwait for assignedAddrs", fillcolor="#FFB74D"];
+        s1_7 [label="7. Server responds\nwith assigned URIs", fillcolor="#FFB74D"];
+        s1_8 [label="8. Validate hostname match\nupdate assignedAddrs", fillcolor="#FFB74D"];
+        s1_9 [label="9. Update listener.route\nin controller state", fillcolor="#90CAF9"];
+        s1_10 [label="10. Update Gateway.status\nin Kubernetes", fillcolor="#90CAF9"];
+
+        s1_1 -> s1_2 -> s1_3 -> s1_4 -> s1_5 -> s1_6 -> s1_7 -> s1_8 -> s1_9 -> s1_10;
+    }
+
+    // ========================================
+    // SCENARIO 2: SSH Reconnect with Wrong Hostname
+    // ========================================
+
+    subgraph cluster_scenario2 {
+        label="Scenario 2: SSH Reconnect with Wrong Hostname";
+        style=filled;
+        color="#FFF3E0";
+
+        s2_1 [label="1. SSH disconnects\n(network issue)", fillcolor="#FFE0B2"];
+        s2_2 [label="2. SSH.closeClient()\nclears forwardings +\nassignedAddrs", fillcolor="#FFCC80"];
+        s2_3 [label="3. listener.route remains\n(stale state)", fillcolor="#FFE082", style="filled,dashed"];
+        s2_4 [label="4. Gateway.Reconcile()\ndetects disconnect", fillcolor="#A5D6A7"];
+        s2_5 [label="5. Gateway calls\nSSH.Connect()", fillcolor="#FFCC80"];
+        s2_6 [label="6. Route.Reconcile()\ntriggers (0-10s)", fillcolor="#90CAF9"];
+        s2_7 [label="7. GW.SetRoute() called\nisForwardingValid() check", fillcolor="#90CAF9"];
+        s2_8 [label="8. GetAssignedAddresses()\nreturns nil", fillcolor="#FFB74D"];
+        s2_9 [label="9. Clear listener.route\n(detect stale)", fillcolor="#90CAF9"];
+        s2_10 [label="10. Retry StartForwarding()", fillcolor="#FFB74D"];
+        s2_11 [label="11. Server assigns\nWRONG hostname", fillcolor="#FFCC80", style="filled,dashed"];
+        s2_12 [label="12. Hostname validation fails\nreturn error", fillcolor="#FFCC80"];
+        s2_13 [label="13. SetRoute() fails\nKubernetes exponential\nbackoff retry", fillcolor="#90CAF9"];
+
+        s2_1 -> s2_2 -> s2_3 -> s2_4 -> s2_5 -> s2_6 -> s2_7 -> s2_8 -> s2_9 -> s2_10 -> s2_11 -> s2_12 -> s2_13;
+    }
+
+    // ========================================
+    // SCENARIO 3: Periodic Validation (Happy Path)
+    // ========================================
+
+    subgraph cluster_scenario3 {
+        label="Scenario 3: Periodic Validation (Happy Path)";
+        style=filled;
+        color="#E8F5E9";
+
+        s3_1 [label="1. Route.Reconcile()\nevery 10s", fillcolor="#C8E6C9"];
+        s3_2 [label="2. GW.SetRoute() called", fillcolor="#A5D6A7"];
+        s3_3 [label="3. isRouteAlreadyAttached()\nchecks listener.route", fillcolor="#A5D6A7"];
+        s3_4 [label="4. isForwardingValid()\ncalls GetAssignedAddresses()", fillcolor="#A5D6A7"];
+        s3_5 [label="5. assignedAddrs exists\nhostname matches", fillcolor="#FFCC80"];
+        s3_6 [label="6. Return success\n(no-op, no SSH calls)", fillcolor="#A5D6A7"];
+
+        s3_1 -> s3_2 -> s3_3 -> s3_4 -> s3_5 -> s3_6;
+    }
+
+    // ========================================
+    // CRITICAL INVARIANTS
+    // ========================================
+
+    invariants [label=<
+        <table border="0" cellborder="1" cellspacing="0" cellpadding="8">
+            <tr><td bgcolor="#FFCDD2" colspan="2"><b>Critical State Invariants</b></td></tr>
+            <tr><td><b>Invariant 1</b></td><td>forwardings and assignedAddrs are ALWAYS cleaned together<br/>(closeClient, StopForwarding)</td></tr>
+            <tr><td><b>Invariant 2</b></td><td>listener.route != nil does NOT guarantee forwarding exists<br/>(controller restart or SSH reconnect cases)</td></tr>
+            <tr><td><b>Invariant 3</b></td><td>assignedAddrs is the ONLY source of truth for forwarding existence<br/>(not listener.route)</td></tr>
+            <tr><td><b>Invariant 4</b></td><td>Hostname validation happens in SSH Manager<br/>(fail fast if server assigns wrong hostname)</td></tr>
+            <tr><td><b>Invariant 5</b></td><td>GetAssignedAddresses uses RLock for concurrent reads<br/>(called frequently by periodic reconciliation)</td></tr>
+            <tr><td><b>Invariant 6</b></td><td>Lock hierarchy: clientMu acquired before addrNotifMu<br/>(prevents deadlocks)</td></tr>
+            <tr><td><b>Recovery</b></td><td>isForwardingValid() detects stale state → clear listener.route → retry<br/>Kubernetes exponential backoff handles retry timing</td></tr>
+        </table>
+    >, shape=plaintext];
+
+    // ========================================
+    // VALIDATION FLOW
+    // ========================================
+
+    validation [label=<
+        <table border="0" cellborder="1" cellspacing="0" cellpadding="8">
+            <tr><td bgcolor="#E1BEE7" colspan="2"><b>isForwardingValid() Logic</b></td></tr>
+            <tr><td>Step 1</td><td>Call GetAssignedAddresses(remoteHost, remotePort)</td></tr>
+            <tr><td>Step 2</td><td>If len(addrs) == 0 → return false (no forwarding)</td></tr>
+            <tr><td>Step 3</td><td>If remoteHost == "0.0.0.0" → return true (wildcard)</td></tr>
+            <tr><td>Step 4</td><td>For each addr in addrs: if contains(remoteHost) → return true</td></tr>
+            <tr><td>Step 5</td><td>return false (hostname mismatch)</td></tr>
+        </table>
+    >, shape=plaintext];
+
+    // ========================================
+    // STATE TRANSITIONS
+    // ========================================
+
+    state_machine [label=<
+        <table border="0" cellborder="1" cellspacing="0" cellpadding="8">
+            <tr><td bgcolor="#B2DFDB" colspan="3"><b>Route State Machine</b></td></tr>
+            <tr><td><b>State</b></td><td><b>listener.route</b></td><td><b>assignedAddrs</b></td></tr>
+            <tr><td>Not Attached</td><td>nil</td><td>empty</td></tr>
+            <tr><td>Attached &amp; Valid</td><td>non-nil</td><td>exists, hostname matches</td></tr>
+            <tr><td>Stale (needs retry)</td><td>non-nil</td><td>empty OR hostname mismatch</td></tr>
+            <tr><td>Adopting Existing</td><td>nil → non-nil</td><td>exists (ErrForwardingExists)</td></tr>
+        </table>
+    >, shape=plaintext];
+
+    {rank=same; invariants; validation; state_machine}
+}

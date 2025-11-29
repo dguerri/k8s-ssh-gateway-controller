@@ -1,0 +1,210 @@
+digraph HighLevelArchitecture {
+    // Graph settings
+    rankdir=TB;
+    compound=true;
+    splines=ortho;
+    nodesep=1.0;
+    ranksep=1.2;
+
+    // Style definitions
+    node [shape=box, style="rounded,filled", fontname="Arial", fontsize=12];
+    edge [fontname="Arial", fontsize=10];
+
+    // ========================================
+    // LAYERS
+    // ========================================
+
+    subgraph cluster_k8s_resources {
+        label="Kubernetes Resources";
+        style=filled;
+        color=lightgrey;
+
+        resources [label=<
+            <table border="0" cellborder="1" cellspacing="0" cellpadding="8">
+                <tr><td bgcolor="#E1F5FE"><b>GatewayClass</b></td></tr>
+                <tr><td bgcolor="#E1F5FE"><b>Gateway</b><br/>• Listeners<br/>• SSH config</td></tr>
+                <tr><td bgcolor="#E1F5FE"><b>HTTPRoute</b><br/>• Hostname rules<br/>• Backends</td></tr>
+                <tr><td bgcolor="#E1F5FE"><b>TCPRoute</b><br/>• Port rules<br/>• Backends</td></tr>
+            </table>
+        >, shape=plaintext];
+    }
+
+    subgraph cluster_controllers {
+        label="Controller Layer";
+        style=filled;
+        color="#FFF9C4";
+
+        route_controllers [label=<
+            <table border="0" cellborder="1" cellspacing="0" cellpadding="8">
+                <tr><td colspan="2" bgcolor="#90CAF9"><b>Route Controllers</b></td></tr>
+                <tr><td bgcolor="#BBDEFB">HTTPRoute<br/>Reconciler</td><td bgcolor="#BBDEFB">TCPRoute<br/>Reconciler</td></tr>
+                <tr><td colspan="2"><font point-size="10"><b>Responsibilities:</b><br/>
+                • Watch route resources<br/>
+                • Periodic reconciliation (10s)<br/>
+                • Validate forwardings exist<br/>
+                • Call SetRoute/RemoveRoute<br/>
+                • Fail fast on errors</font></td></tr>
+            </table>
+        >, shape=plaintext];
+
+        gateway_controller [label=<
+            <table border="0" cellborder="1" cellspacing="0" cellpadding="8">
+                <tr><td bgcolor="#A5D6A7"><b>Gateway Controller</b></td></tr>
+                <tr><td><font point-size="10"><b>Responsibilities:</b><br/>
+                • Watch Gateway resources<br/>
+                • Periodic reconciliation (30s)<br/>
+                • Check SSH connection health<br/>
+                • Reconnect on disconnect<br/>
+                • Provide gateway/listener registry<br/>
+                • Provide validation helpers<br/><br/>
+                <b>Key Functions:</b><br/>
+                • SetRoute() - setup forwarding<br/>
+                • RemoveRoute() - teardown<br/>
+                • isForwardingValid() - validate<br/>
+                • updateGatewayStatus() - K8s API</font></td></tr>
+            </table>
+        >, shape=plaintext];
+    }
+
+    subgraph cluster_ssh {
+        label="SSH Layer";
+        style=filled;
+        color="#FFE0B2";
+
+        ssh_manager [label=<
+            <table border="0" cellborder="1" cellspacing="0" cellpadding="8">
+                <tr><td bgcolor="#FFCC80"><b>SSH Tunnel Manager</b></td></tr>
+                <tr><td><font point-size="10"><b>Responsibilities:</b><br/>
+                • Establish/close SSH connection<br/>
+                • Send keepalives, detect failures<br/>
+                • Start/stop forwardings<br/>
+                • Validate hostname matches<br/>
+                • Maintain clean state<br/>
+                • Proxy traffic to backends<br/>
+                • Fail fast on errors<br/>
+                • Does NOT reconnect automatically<br/><br/>
+                <b>Key Functions:</b><br/>
+                • Connect/IsConnected<br/>
+                • StartForwarding/StopForwarding<br/>
+                • GetAssignedAddresses (RLock)<br/>
+                • handleChannels (traffic proxy)<br/>
+                • monitorConnection (keepalive only)<br/><br/>
+                <b>State (always consistent):</b><br/>
+                • forwardings map<br/>
+                • assignedAddrs map</font></td></tr>
+            </table>
+        >, shape=plaintext];
+    }
+
+    subgraph cluster_external {
+        label="External Systems";
+        style=filled;
+        color="#F3E5F5";
+
+        ssh_server [label="SSH Server\n(pico.sh / tuns.sh)\n\n• Reverse port forwarding\n• Hostname assignment\n• Public endpoint", fillcolor="#E1BEE7"];
+        backends [label="Kubernetes Services\n(Backends)\n\n• ClusterIP services\n• Internal endpoints", fillcolor="#E1BEE7"];
+        internet [label="Internet\nClients", fillcolor="#E1BEE7", shape=ellipse];
+    }
+
+    k8s_api [label="Kubernetes API\nServer", fillcolor="#FFEBEE", shape=ellipse];
+
+    // ========================================
+    // FLOW: Kubernetes Events
+    // ========================================
+
+    resources -> route_controllers [label="  watch events  ", style=dashed, color="#2196F3", penwidth=2];
+    resources -> gateway_controller [label="  watch events  ", style=dashed, color="#2196F3", penwidth=2];
+
+    // ========================================
+    // FLOW: Route Controller → Gateway Controller
+    // ========================================
+
+    route_controllers -> gateway_controller [label=<
+        <table border="0" cellborder="0" cellspacing="0">
+            <tr><td><b>SetRoute()</b></td></tr>
+            <tr><td>• gateway/listener info</td></tr>
+            <tr><td>• route details</td></tr>
+            <tr><td>• backend host:port</td></tr>
+            <tr><td><br/><b>RemoveRoute()</b></td></tr>
+            <tr><td>• cleanup forwarding</td></tr>
+        </table>
+    >, color="#4CAF50", penwidth=2];
+
+    // ========================================
+    // FLOW: Gateway Controller → SSH Manager
+    // ========================================
+
+    gateway_controller -> ssh_manager [label=<
+        <table border="0" cellborder="0" cellspacing="0">
+            <tr><td><b>Connection Management:</b></td></tr>
+            <tr><td>• IsConnected()</td></tr>
+            <tr><td>• Connect()</td></tr>
+            <tr><td><br/><b>Forwarding Operations:</b></td></tr>
+            <tr><td>• StartForwarding()</td></tr>
+            <tr><td>• StopForwarding()</td></tr>
+            <tr><td><br/><b>Validation:</b></td></tr>
+            <tr><td>• GetAssignedAddresses()</td></tr>
+        </table>
+    >, color="#FF9800", penwidth=2];
+
+    // ========================================
+    // FLOW: SSH Manager → SSH Server
+    // ========================================
+
+    ssh_manager -> ssh_server [label=<
+        <table border="0" cellborder="0" cellspacing="0">
+            <tr><td><b>SSH Protocol:</b></td></tr>
+            <tr><td>• tcpip-forward request</td></tr>
+            <tr><td>• cancel-tcpip-forward</td></tr>
+            <tr><td>• forwarded-tcpip channels</td></tr>
+        </table>
+    >, color="#F44336", penwidth=2, dir=both];
+
+    // ========================================
+    // FLOW: Traffic Proxy
+    // ========================================
+
+    ssh_manager -> backends [label="  proxy traffic\n  (forwarded-tcpip)  ", color="#4CAF50", penwidth=2, style=bold];
+
+    // ========================================
+    // FLOW: Internet → Backend
+    // ========================================
+
+    internet -> ssh_server [label="  HTTP/TCP\n  requests  ", color="#9C27B0", penwidth=2];
+    ssh_server -> internet [label="  responses  ", color="#9C27B0", penwidth=2, style=dashed];
+
+    // ========================================
+    // FLOW: Status Updates
+    // ========================================
+
+    gateway_controller -> k8s_api [label="  update Gateway\n  status/addresses  ", color="#2196F3", penwidth=2, style=dotted];
+
+    // ========================================
+    // PERIODIC RECONCILIATION ANNOTATIONS
+    // ========================================
+
+    periodic_routes [label="Periodic: 10s", shape=note, fillcolor="#FFFFCC", style=filled];
+    periodic_gateway [label="Periodic: 30s", shape=note, fillcolor="#FFFFCC", style=filled];
+
+    periodic_routes -> route_controllers [style=invisible];
+    periodic_gateway -> gateway_controller [style=invisible];
+
+    // ========================================
+    // KEY PRINCIPLES
+    // ========================================
+
+    principles [label=<
+        <table border="0" cellborder="1" cellspacing="0" cellpadding="8">
+            <tr><td bgcolor="#C8E6C9" colspan="2"><b>Architecture Principles</b></td></tr>
+            <tr><td><b>Separation of Concerns</b></td><td>Gateway owns connection, Routes own forwardings, SSH manages primitives</td></tr>
+            <tr><td><b>Fail Fast</b></td><td>Synchronous validation, return errors immediately, let Kubernetes retry</td></tr>
+            <tr><td><b>Single Source of Truth</b></td><td>SSH Manager maintains authoritative state (forwardings + assignedAddrs)</td></tr>
+            <tr><td><b>Periodic Reconciliation</b></td><td>Routes (10s) validate forwardings, Gateway (30s) checks connection</td></tr>
+            <tr><td><b>Hostname Validation</b></td><td>SSH Manager validates assigned hostname matches request (fails if wrong)</td></tr>
+            <tr><td><b>State Consistency</b></td><td>forwardings and assignedAddrs always cleaned together</td></tr>
+            <tr><td><b>Concurrent Reads</b></td><td>GetAssignedAddresses uses RWMutex.RLock for performance</td></tr>
+        </table>
+    >, shape=plaintext];
+
+    {rank=sink; principles}
+}
