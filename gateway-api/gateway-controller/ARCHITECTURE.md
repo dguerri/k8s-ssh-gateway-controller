@@ -44,6 +44,45 @@ The SSH Gateway API Controller is a Kubernetes controller that implements the Ga
                       Internet Traffic
 ```
 
+## Architecture: Separation of Concerns
+
+The controller follows a clean three-layer architecture where each layer has a single, well-defined responsibility:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Route Controllers (HTTPRoute, TCPRoute)                      │
+│ Responsibility: Own forwarding lifecycle                     │
+│ - Ensure forwardings exist and are valid                     │
+│ - Validate assigned addresses match expectations             │
+│ - Fail fast, return errors for Kubernetes to retry           │
+│ - Clear stale state when validation fails                    │
+└─────────────────────────────────────────────────────────────┘
+                          ↓ SetRoute(), RemoveRoute()
+┌─────────────────────────────────────────────────────────────┐
+│ Gateway Controller                                           │
+│ Responsibility: SSH connection health                        │
+│ - Check IsConnected() periodically                           │
+│ - Reconnect SSH when needed                                  │
+│ - Provide gateway/listener registry                          │
+│ - Provide forwarding validation helpers                      │
+│ - Do NOT establish forwardings directly                      │
+└─────────────────────────────────────────────────────────────┘
+                          ↓ IsConnected(), StartForwarding(),
+                            GetAssignedAddresses()
+┌─────────────────────────────────────────────────────────────┐
+│ SSH Tunnel Manager                                           │
+│ Responsibility: Simple SSH operations                        │
+│ - Connect/disconnect SSH                                     │
+│ - Start/stop port forwardings                                │
+│ - Validate hostname matches (fail if wrong)                  │
+│ - Maintain clean state (forwardings, assignedAddrs)          │
+│ - Fail fast on all errors                                    │
+│ - No knowledge of Kubernetes or controllers                  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Key Principle:** Single source of truth for each concern. Gateway owns connection, routes own forwardings, SSH manager owns SSH primitives.
+
 ## Core Components
 
 ### 1. Main Entry Point (`main.go`)
@@ -118,17 +157,18 @@ Reconcile(gateway) →
 
 ```
 SSH Disconnect Detected →
-├─ closeClient()
+├─ SSH manager closeClient()
 │  ├─ Clear assigned addresses
 │  └─ Clear forwarding state
 │
-└─ On next Gateway reconcile →
-   ├─ Connect()
-   └─ syncAllRoutes()
-      └─ For each listener with route:
-         └─ StartForwarding()  // Restore SSH forwardings
-                                // Routes detect reconnection via periodic reconciliation
+└─ Gateway reconciles (within 0-30s) →
+   ├─ Detects disconnect via IsConnected()
+   ├─ Calls Connect()
+   └─ SSH reconnected, logs success
+      └─ Route controllers restore forwardings via periodic reconciliation (0-10s)
 ```
+
+**Separation of concerns:** Gateway owns connection, routes own forwardings.
 
 **3. Controller Restart Recovery**
 
@@ -152,28 +192,36 @@ Controller Pod Restarts →
 
 **Recovery time**: 0-10s (up to one route reconciliation period)
 
-**4. Route Attachment (SetRoute)**
+**4. Route Attachment with Forwarding Validation (SetRoute)**
 
 ```
 SetRoute(gateway, listener, route, backend) →
 ├─ Find gateway in internal registry
 ├─ Find listener in gateway
 │
-├─ Idempotency check:
-│  └─ If route already correctly attached → return success (no-op)
+├─ Idempotency check with validation:
+│  ├─ Route already attached? YES
+│  ├─ Validate: isForwardingValid()?
+│  │  ├─ Check GetAssignedAddresses() returns URIs
+│  │  └─ For hostname-based: verify hostname matches
+│  ├─ If valid → return success (no-op) ✓
+│  └─ If invalid → clear l.route, fall through to retry
 │
 ├─ If listener has different route:
 │  └─ StopForwarding(old route)
 │
 ├─ Check SSH connection status
 ├─ StartForwarding(new route)
-│  ├─ If forwarding succeeds → store route, update status
-│  ├─ If ErrSSHClientNotReady → return error (gateway not ready)
-│  └─ If ErrSSHForwardingExists → adopt existing forwarding
-│                                   (controller restart scenario)
+│  ├─ If forwarding succeeds → store route, update status ✓
+│  ├─ If ErrSSHClientNotReady → return error (gateway not ready, backoff)
+│  ├─ If ErrSSHForwardingExists → adopt existing forwarding ✓
+│  └─ If wrong hostname → return error (backoff, retry later)
+│
 ├─ Store route in listener
 └─ Update Gateway status with assigned addresses
 ```
+
+**Key improvement:** Validates forwardings on every reconciliation, detects stale state.
 
 **4. Gateway Status Management**
 
@@ -190,10 +238,15 @@ updateGatewayAddresses(gateway) →
 #### Important Methods
 
 - `SetRoute()`: Attaches a route to a listener (called by route controllers)
-  - Handles idempotency: no-op if route already correctly attached
+  - Validates forwarding exists before claiming route is attached
+  - Clears stale state if forwarding is invalid
   - Adopts existing SSH forwardings when controller restarts
+  - Handles idempotency: no-op if route already correctly attached AND forwarding valid
 - `RemoveRoute()`: Detaches a route from a listener
-- `syncAllRoutes()`: Restores all routes in internal state after SSH reconnection
+- `isForwardingValid()`: Validates that SSH manager has valid forwarding for listener
+  - Checks GetAssignedAddresses() returns URIs
+  - For hostname-based: verifies hostname matches
+  - For wildcard (0.0.0.0): accepts any assigned address
 - `updateGatewayAddresses()`: Extracts SSH-assigned URIs and populates Gateway status
 
 ---

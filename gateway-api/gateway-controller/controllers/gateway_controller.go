@@ -110,6 +110,30 @@ func isRouteAlreadyAttached(l *Listener, routeName, routeNamespace, backendHost 
 		l.route.Port == backendPort
 }
 
+// isForwardingValid checks if a forwarding exists in SSH manager and matches expectations.
+// For hostname-based forwardings: verifies assigned URIs contain the requested hostname.
+// For wildcard (0.0.0.0): accepts any assigned address.
+// Returns false if no addresses assigned or hostname mismatch.
+func (r *GatewayReconciler) isForwardingValid(l *Listener) bool {
+	addrs := r.manager.GetAssignedAddresses(l.Hostname, l.Port)
+	if len(addrs) == 0 {
+		return false // No forwarding exists in SSH manager
+	}
+
+	// For specific hostnames (not wildcard), verify hostname matches
+	if l.Hostname != "0.0.0.0" {
+		for _, addr := range addrs {
+			if strings.Contains(addr, l.Hostname) {
+				return true // Found matching hostname in URIs
+			}
+		}
+		return false // Hostname mismatch (wrong subdomain assigned)
+	}
+
+	// For wildcard, any address is valid
+	return true
+}
+
 // SetRoute sets up forwarding for a specific route on a listener.
 func (r *GatewayReconciler) SetRoute(ctx context.Context, gwNamespace, gwName, listenerName, routeName, routeNamespace, backendHost string, backendPort int) error {
 	r.gatewaysMu.Lock()
@@ -142,10 +166,19 @@ func (r *GatewayReconciler) SetRoute(ctx context.Context, gwNamespace, gwName, l
 
 		// Check if route is already correctly attached (idempotency for periodic reconciliation)
 		if isRouteAlreadyAttached(l, routeName, routeNamespace, backendHost, backendPort) {
-			slog.With("function", "SetRoute").Debug("route already correctly attached, nothing to do",
-				"gateway", gwKey,
-				"route", fmt.Sprintf("%s/%s", routeNamespace, routeName))
-			return nil
+			// Validate forwarding still exists and is valid
+			if !r.isForwardingValid(l) {
+				slog.With("function", "SetRoute").Warn("route attached but forwarding invalid, will retry",
+					"gateway", gwKey,
+					"route", fmt.Sprintf("%s/%s", routeNamespace, routeName))
+				l.route = nil // Clear stale state
+				// Fall through to retry StartForwarding below
+			} else {
+				slog.With("function", "SetRoute").Debug("route already correctly attached, nothing to do",
+					"gateway", gwKey,
+					"route", fmt.Sprintf("%s/%s", routeNamespace, routeName))
+				return nil
+			}
 		}
 
 		if l.route != nil {
@@ -324,63 +357,6 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// syncAllRoutes iterates through all known gateways and listeners,
-// re-applying the forwarding configurations to the SSH manager.
-// This is used when the SSH connection is re-established.
-func (r *GatewayReconciler) syncAllRoutes() {
-	r.gatewaysMu.Lock()
-	defer r.gatewaysMu.Unlock()
-
-	totalGateways := len(r.gateways)
-	totalListeners := 0
-	routesRestored := 0
-	listenersWithoutRoutes := 0
-
-	slog.With("function", "syncAllRoutes").Info("syncing all routes after reconnection",
-		"gateways", totalGateways)
-
-	for gwKey, gw := range r.gateways {
-		gw.listenersMu.Lock()
-		totalListeners += len(gw.listeners)
-		for listenerName, l := range gw.listeners {
-			if l.route != nil {
-				slog.With("function", "syncAllRoutes", "gateway", gwKey, "listener", listenerName).Info("restoring route forwarding",
-					"route", fmt.Sprintf("%s/%s", l.route.Namespace, l.route.Name),
-					"backend", fmt.Sprintf("%s:%d", l.route.Host, l.route.Port))
-				err := r.manager.StartForwarding(sshmgr.ForwardingConfig{
-					RemoteHost:   l.Hostname,
-					RemotePort:   l.Port,
-					InternalHost: l.route.Host,
-					InternalPort: l.route.Port,
-				})
-				if err != nil {
-					// Check if forwarding already exists (might happen if we didn't really lose connection but IsConnected returned false incorrectly, though unlikely)
-					var existsErr *sshmgr.ErrSSHForwardingExists
-					if errors.As(err, &existsErr) {
-						slog.With("function", "syncAllRoutes", "gateway", gwKey, "listener", listenerName).Debug("forwarding already exists, skipping")
-						routesRestored++
-						continue
-					}
-					slog.With("function", "syncAllRoutes", "gateway", gwKey, "listener", listenerName).Error("failed to restore forwarding", "error", err)
-				} else {
-					routesRestored++
-					slog.With("function", "syncAllRoutes", "gateway", gwKey, "listener", listenerName).Info("route forwarding restored successfully")
-				}
-			} else {
-				listenersWithoutRoutes++
-				slog.With("function", "syncAllRoutes", "gateway", gwKey, "listener", listenerName).Debug("listener has no route assigned, skipping")
-			}
-		}
-		gw.listenersMu.Unlock()
-	}
-
-	slog.With("function", "syncAllRoutes").Info("route sync completed",
-		"totalGateways", totalGateways,
-		"totalListeners", totalListeners,
-		"routesRestored", routesRestored,
-		"listenersWithoutRoutes", listenersWithoutRoutes)
-}
-
 func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	key := fmt.Sprintf("%s/%s", req.Namespace, req.Name)
 	slog.With("function", "Reconcile").Debug("reconciling Gateway", "gateway", key, "request", req)
@@ -392,11 +368,8 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			slog.With("function", "Reconcile").Error("failed to connect SSH manager", "error", err)
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
-		// Connection established, sync routes that are already in internal state
 		slog.With("function", "Reconcile").Info("SSH connection established/restored")
-		r.syncAllRoutes()
-		// Note: Routes will reconcile on their own periodic schedule (ROUTE_RECONCILE_PERIOD)
-		// and retry attachment when they detect the gateway is ready
+		// Route controllers will detect reconnection and restore forwardings via periodic reconciliation
 	}
 
 	var k8sGw gatewayv1.Gateway
