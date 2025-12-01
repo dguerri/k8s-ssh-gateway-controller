@@ -76,7 +76,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Debug("route set successfully")
 	} else {
 		// Handle deletion
-		slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Debug("deleting HTTPRoute")
+		slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Info("processing HTTPRoute deletion")
 		if containsString(k8sRoute.Finalizers, httpRouteFinalizer) {
 			err := r.GatewayReconciler.RemoveRoute(
 				ctx,
@@ -91,8 +91,9 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 					slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Error("failed to remove route", "error", err)
 					return ctrl.Result{}, err
 				}
-				// Gateway or route were deleted, no need to requeue
 			}
+			// Gateway or route were deleted, no need to requeue
+
 			k8sRoute.Finalizers = removeString(k8sRoute.Finalizers, httpRouteFinalizer)
 			if err := r.Update(ctx, &k8sRoute); err != nil {
 				slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Error("failed to remove finalizer", "error", err)

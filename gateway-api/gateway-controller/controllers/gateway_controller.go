@@ -413,8 +413,9 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	if k8sGw.DeletionTimestamp.IsZero() {
 		// Handle add or Update
+		slog.With("function", "Reconcile", "gateway", req.NamespacedName).Debug("adding or updating gateway")
+		// Add a finalizer so we can correctly clean up the route when it's deleted
 		if !containsString(k8sGw.Finalizers, gatewayFinalizer) {
-			// Add finalizer if not present
 			k8sGw.Finalizers = append(k8sGw.Finalizers, gatewayFinalizer)
 			if err := r.Update(ctx, &k8sGw); err != nil {
 				slog.With("function", "Reconcile").Error("failed to add finalizer", "gateway", key, "error", err)
@@ -429,6 +430,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	} else {
 		// Handle deletion
+		slog.With("function", "Reconcile", "gateway", req.NamespacedName).Info("processing gateway deletion")
 		if containsString(k8sGw.Finalizers, gatewayFinalizer) {
 			r.handleDeleteGateway(ctx, &k8sGw)
 			k8sGw.Finalizers = removeString(k8sGw.Finalizers, gatewayFinalizer)

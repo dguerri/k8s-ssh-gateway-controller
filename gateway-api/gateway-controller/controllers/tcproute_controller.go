@@ -36,13 +36,6 @@ func (r *TCPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Check if route is being deleted
-	if !k8sRoute.DeletionTimestamp.IsZero() {
-		slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Info("TCPRoute is being deleted",
-			"deletionTimestamp", k8sRoute.DeletionTimestamp,
-			"hasFinalizer", containsString(k8sRoute.Finalizers, tcpRouteFinalizer))
-	}
-
 	routeDetails, err := extractTCPRouteDetails(&k8sRoute)
 	if err != nil {
 		slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Error("failed to extract TCPRoute details", "error", err)
@@ -51,7 +44,7 @@ func (r *TCPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	if k8sRoute.DeletionTimestamp.IsZero() {
 		// Add or Update.
-
+		slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Debug("adding or updating TCPRoute")
 		// Add a finalizer so we can correctly clean up the route when it's deleted
 		if !containsString(k8sRoute.Finalizers, tcpRouteFinalizer) {
 			k8sRoute.Finalizers = append(k8sRoute.Finalizers, tcpRouteFinalizer)
@@ -98,7 +91,6 @@ func (r *TCPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 					slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Error("failed to remove route", "error", err)
 					return ctrl.Result{}, err
 				}
-				// Gateway or route were deleted, no need to requeue
 			}
 			// Gateway or route were deleted, no need to requeue
 
