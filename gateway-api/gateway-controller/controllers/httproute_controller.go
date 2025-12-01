@@ -5,12 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
@@ -26,7 +24,6 @@ type HTTPRouteReconciler struct {
 func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1.HTTPRoute{}).
-		WithEventFilter(predicate.GenerationChangedPredicate{}). // only trigger on spec changes
 		Complete(r)
 }
 
@@ -67,8 +64,11 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			var notReadyErr *ErrGatewayNotReady
 			var notFoundErr *ErrGatewayNotFound
 			if errors.As(err, &notReadyErr) || errors.As(err, &notFoundErr) {
-				slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Debug("gateway not ready, requeuing HTTPRoute")
-				return ctrl.Result{Requeue: true, RequeueAfter: 1 * time.Second}, nil
+				slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Warn("gateway not ready or not found, will retry with backoff",
+					"gateway", fmt.Sprintf("%s/%s", routeDetails.gwNamespace, routeDetails.gwName),
+					"error", err.Error())
+				// Return error to trigger controller-runtime's exponential backoff
+				return ctrl.Result{}, err
 			}
 			slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Error("failed to set route", "error", err)
 			return ctrl.Result{}, err
@@ -102,7 +102,8 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 
-	return ctrl.Result{}, nil
+	// Periodically reconcile to retry failed route attachments and ensure routes are active
+	return ctrl.Result{RequeueAfter: routeReconcilePeriod}, nil
 }
 
 // extractHTTPRouteDetails extracts common route details from the resource.

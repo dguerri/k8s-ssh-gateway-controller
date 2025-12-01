@@ -15,17 +15,30 @@ import (
 const defaultKeyPath = "/ssh/id"
 const defaultSSHServer = "localhost:22"
 const defaultSSHUsername = "tunnel-user"
-const defaultBackoffInterval = 5 * time.Second
 const defaultKeepAliveInterval = 10 * time.Second
 const defaultConnectTimeout = 5 * time.Second
 
+// Defaults for controller reconciliation periods
+const (
+	// defaultGatewayReconcilePeriod is how often the Gateway controller reconciles
+	// to check SSH connection health and update status
+	defaultGatewayReconcilePeriod = 30 * time.Second
+
+	// defaultRouteReconcilePeriod is how often HTTPRoute/TCPRoute controllers reconcile
+	// to retry failed route attachments and ensure routes are active
+	defaultRouteReconcilePeriod = 10 * time.Second
+)
+
 var keyPath = getEnvOrDefault("SSH_PRIVATE_KEY_PATH", defaultKeyPath)
-var backoffInterval = getEnvDurationOrDefault("BACKOFF_INTERVAL", defaultBackoffInterval)
 var keepAliveInterval = getEnvDurationOrDefault("KEEP_ALIVE_INTERVAL", defaultKeepAliveInterval)
 var connectTimeout = getEnvDurationOrDefault("CONNECT_TIMEOUT", defaultConnectTimeout)
 var sshServer = getEnvOrDefault("SSH_SERVER", defaultSSHServer)
 var sshUsername = getEnvOrDefault("SSH_USERNAME", defaultSSHUsername)
 var sshHostKey = getEnvOrDefault("SSH_HOST_KEY", "")
+
+// Reconciliation period configuration
+var gatewayReconcilePeriod = getEnvDurationOrDefault("GATEWAY_RECONCILE_PERIOD", defaultGatewayReconcilePeriod)
+var routeReconcilePeriod = getEnvDurationOrDefault("ROUTE_RECONCILE_PERIOD", defaultRouteReconcilePeriod)
 
 // Dependency injection for testing purposes
 var osReadFile = os.ReadFile
@@ -113,7 +126,6 @@ func createSSHManager(ctx context.Context) (*sshmgr.SSHTunnelManager, error) {
 		ConnectTimeout:    connectTimeout,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: keepAliveInterval,
-		BackoffInterval:   backoffInterval,
 		RemoteAddrFunc:    getRemoteAddress,
 	}
 

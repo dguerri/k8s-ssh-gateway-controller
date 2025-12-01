@@ -24,13 +24,24 @@ func (a *fakeAddr) Network() string { return "tcp" }
 func (a *fakeAddr) String() string { return "" }
 
 // fakeNetConn represents a fake network connection.
-type fakeNetConn struct{}
+type fakeNetConn struct {
+	readOnce sync.Once
+}
 
 // Close closes the connection.
 func (f *fakeNetConn) Close() error { return nil }
 
 // Read reads data from the connection.
-func (f *fakeNetConn) Read([]byte) (int, error) { return 0, nil }
+func (f *fakeNetConn) Read([]byte) (int, error) {
+	var err error
+	f.readOnce.Do(func() {
+		err = io.EOF
+	})
+	if err != nil {
+		return 0, err
+	}
+	return 0, nil
+}
 
 // Write writes data to the connection.
 func (f *fakeNetConn) Write([]byte) (int, error) { return 0, nil }
@@ -79,9 +90,17 @@ type fakeNewSshChannel struct {
 }
 
 type fakeSshChannel struct {
+	readOnce sync.Once
 }
 
 func (f *fakeSshChannel) Read(b []byte) (int, error) {
+	var err error
+	f.readOnce.Do(func() {
+		err = io.EOF
+	})
+	if err != nil {
+		return 0, err
+	}
 	return 0, nil
 }
 
@@ -129,6 +148,7 @@ func (f *fakeNewSshChannel) ExtraData() []byte {
 func (f *fakeNewSshChannel) Accept() (ssh.Channel, <-chan *ssh.Request, error) {
 	fakeConn := &fakeSshChannel{}
 	requests := make(chan *ssh.Request)
+	close(requests) // Close the requests channel immediately as we don't send any fake requests
 	return fakeConn, requests, nil
 }
 
@@ -139,14 +159,13 @@ func (f *fakeNewSshChannel) Reject(reason ssh.RejectionReason, message string) e
 
 // HandleChannelOpen simulates handling channel open requests and keeps producing fakeNewSshChannels.
 func (f *fakeClient) HandleChannelOpen(channelType string) <-chan ssh.NewChannel {
-	ch := make(chan ssh.NewChannel)
+	ch := make(chan ssh.NewChannel, 1) // Buffered channel for one message
 	go func() {
-		for {
-			ch <- &fakeNewSshChannel{channelType: channelType, extraData: ssh.Marshal(forwardedTCPPayload{
-				Addr: "0.0.0.0",
-				Port: 2222,
-			})}
-		}
+		defer close(ch) // Close the channel when done
+		ch <- &fakeNewSshChannel{channelType: channelType, extraData: ssh.Marshal(forwardedTCPPayload{
+			Addr: "0.0.0.0",
+			Port: 2222,
+		})}
 	}()
 	return ch
 }

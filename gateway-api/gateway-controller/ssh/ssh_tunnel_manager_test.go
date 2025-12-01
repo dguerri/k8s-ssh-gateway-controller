@@ -28,7 +28,6 @@ func TestNewSSHTunnelManagerWithInvalidKey(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -55,7 +54,6 @@ func TestNewSSHTunnelManager(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -82,14 +80,15 @@ func TestForwardingManagement(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
 	if err != nil {
 		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 	}
-	manager.WaitConnection()
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
 
 	fwd := ForwardingConfig{
 		RemoteHost:   "0.0.0.0",
@@ -143,22 +142,23 @@ func TestKeepAlive(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 80 * time.Millisecond, // Shorter keep alive for testing
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
 	if err != nil {
 		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 	}
-	manager.WaitConnection()
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
 
 	// Give time to send some keep alives.
 	time.Sleep(50 * time.Millisecond)
 
 }
 
-// TestNewSSHTunnelManager tests creating an SSH tunnel manager with failing Dial.
-func TestNewSSHTunnelManagerFailingDialKeepsTrying(t *testing.T) {
+// TestConnectFailsImmediatelyOnDialError tests creating an SSH tunnel manager with failing Dial.
+func TestConnectFailsImmediatelyOnDialError(t *testing.T) {
 	SetupTest(t)
 	sshDialCalledTimes := 0
 	sshDial = func(network, addr string, cfg *ssh.ClientConfig) (sshClient, error) {
@@ -176,7 +176,6 @@ func TestNewSSHTunnelManagerFailingDialKeepsTrying(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   10 * time.Millisecond, // Quicker re-Dial
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -188,11 +187,14 @@ func TestNewSSHTunnelManagerFailingDialKeepsTrying(t *testing.T) {
 		t.Fatal("Expected non-nil manager")
 	}
 
-	// Give time to do at least 1 retry.
-	time.Sleep(100 * time.Millisecond)
+	// Expect Connect to fail immediately
+	err = manager.Connect()
+	if err == nil {
+		t.Fatal("Expected Connect to fail")
+	}
 
-	if sshDialCalledTimes < 2 {
-		t.Fatal("Expected retreying connection")
+	if sshDialCalledTimes != 1 {
+		t.Fatalf("Expected exactly 1 Dial call, got %d", sshDialCalledTimes)
 	}
 }
 
@@ -210,7 +212,6 @@ func TestDuplicateForwarding(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -218,7 +219,9 @@ func TestDuplicateForwarding(t *testing.T) {
 		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 	}
 
-	manager.WaitConnection()
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
 
 	fwd := ForwardingConfig{
 		RemoteHost:   "0.0.0.0",
@@ -255,7 +258,6 @@ func TestStopForwardingNonExisting(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -263,7 +265,9 @@ func TestStopForwardingNonExisting(t *testing.T) {
 		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 	}
 
-	manager.WaitConnection()
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
 
 	fwd := &ForwardingConfig{
 		RemoteHost:   "0.0.0.0",
@@ -296,7 +300,6 @@ func TestCloseStopsForwardings(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -304,7 +307,9 @@ func TestCloseStopsForwardings(t *testing.T) {
 		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 	}
 
-	manager.WaitConnection()
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
 
 	fwd := ForwardingConfig{
 		RemoteHost:   "0.0.0.0",
@@ -336,7 +341,6 @@ func TestGetAssignedAddresses(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -344,7 +348,9 @@ func TestGetAssignedAddresses(t *testing.T) {
 		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 	}
 
-	manager.WaitConnection()
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
 
 	// Test getting addresses for non-existent forwarding
 	addrs := manager.GetAssignedAddresses("example.com", 8080)
@@ -466,39 +472,6 @@ func TestMatchesRequestedHost(t *testing.T) {
 	}
 }
 
-// TestWaitConnectionCancellation tests WaitConnection with canceled context.
-func TestWaitConnectionCancellation(t *testing.T) {
-	SetupTest(t)
-	// Start with a canceled context
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
-
-	sshConfig := SSHConnectionConfig{
-		PrivateKey:        GenerateTestPrivateKey(t),
-		ServerAddress:     "example.com:22",
-		Username:          "testuser",
-		HostKey:           "",
-		ConnectTimeout:    5 * time.Second,
-		FwdReqTimeout:     2 * time.Second,
-		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
-	}
-
-	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
-	if err != nil {
-		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
-	}
-
-	// WaitConnection should return an error since context is canceled
-	err = manager.WaitConnection()
-	if err == nil {
-		t.Error("Expected error from WaitConnection with canceled context")
-	}
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("Expected context.Canceled error, got: %v", err)
-	}
-}
-
 // TestConnectClientWithHostKeyVerification tests host key verification logic.
 func TestConnectClientWithHostKeyVerification(t *testing.T) {
 	SetupTest(t)
@@ -540,7 +513,6 @@ func TestConnectClientWithHostKeyVerification(t *testing.T) {
 			ConnectTimeout:    5 * time.Second,
 			FwdReqTimeout:     2 * time.Second,
 			KeepAliveInterval: 5 * time.Second,
-			BackoffInterval:   2 * time.Second,
 		}
 
 		manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -548,7 +520,9 @@ func TestConnectClientWithHostKeyVerification(t *testing.T) {
 			t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 		}
 
-		manager.WaitConnection()
+		if err := manager.Connect(); err != nil {
+			t.Fatalf("Failed to connect: %v", err)
+		}
 
 		if !hostKeyVerified {
 			t.Error("Expected host key to be verified")
@@ -577,16 +551,17 @@ func TestConnectClientWithHostKeyVerification(t *testing.T) {
 			ConnectTimeout:    5 * time.Second,
 			FwdReqTimeout:     2 * time.Second,
 			KeepAliveInterval: 5 * time.Second,
-			BackoffInterval:   10 * time.Millisecond,
 		}
 
-		_, err := NewSSHTunnelManager(ctx, &sshConfig)
+		manager, err := NewSSHTunnelManager(ctx, &sshConfig)
 		if err != nil {
 			t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 		}
 
-		// Give it time to try connecting
-		time.Sleep(50 * time.Millisecond)
+		err = manager.Connect()
+		if err == nil {
+			t.Fatal("Expected Connect to fail")
+		}
 
 		if !connectionFailed {
 			t.Error("Expected connection to fail with incorrect host key")
@@ -614,13 +589,15 @@ func TestStartForwardingWithoutConnection(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   1 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
 	if err != nil {
 		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 	}
+
+	// Do NOT call Connect() here, or call it and expect error.
+	// The test wants to verify StartForwarding fails if not connected.
 
 	// Try to start forwarding without waiting for connection
 	fwd := ForwardingConfig{
@@ -656,7 +633,6 @@ func TestStopForwardingWithoutConnection(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -664,7 +640,9 @@ func TestStopForwardingWithoutConnection(t *testing.T) {
 		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 	}
 
-	manager.WaitConnection()
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
 
 	fwd := ForwardingConfig{
 		RemoteHost:   "0.0.0.0",
@@ -717,10 +695,7 @@ func TestSendForwardingWithAddressVerification(t *testing.T) {
 			ConnectTimeout:             5 * time.Second,
 			FwdReqTimeout:              2 * time.Second,
 			KeepAliveInterval:          5 * time.Second,
-			BackoffInterval:            2 * time.Second,
 			RemoteAddrFunc:             remoteAddrFunc,
-			MaxForwardingRetries:       3,
-			ForwardingRetryDelay:       10 * time.Millisecond,
 			AddressVerificationTimeout: 200 * time.Millisecond,
 		}
 
@@ -729,7 +704,9 @@ func TestSendForwardingWithAddressVerification(t *testing.T) {
 			t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 		}
 
-		manager.WaitConnection()
+		if err := manager.Connect(); err != nil {
+			t.Fatalf("Failed to connect: %v", err)
+		}
 
 		fwd := ForwardingConfig{
 			RemoteHost:   "dev",
@@ -761,7 +738,7 @@ func TestSendForwardingWithAddressVerification(t *testing.T) {
 		}
 	})
 
-	t.Run("verification timeout continues anyway", func(t *testing.T) {
+	t.Run("verification timeout fails for specific hostname", func(t *testing.T) {
 		SetupTest(t)
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -779,10 +756,7 @@ func TestSendForwardingWithAddressVerification(t *testing.T) {
 			ConnectTimeout:             5 * time.Second,
 			FwdReqTimeout:              2 * time.Second,
 			KeepAliveInterval:          5 * time.Second,
-			BackoffInterval:            2 * time.Second,
 			RemoteAddrFunc:             remoteAddrFunc,
-			MaxForwardingRetries:       3,
-			ForwardingRetryDelay:       10 * time.Millisecond,
 			AddressVerificationTimeout: 50 * time.Millisecond,
 		}
 
@@ -791,7 +765,9 @@ func TestSendForwardingWithAddressVerification(t *testing.T) {
 			t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 		}
 
-		manager.WaitConnection()
+		if err := manager.Connect(); err != nil {
+			t.Fatalf("Failed to connect: %v", err)
+		}
 
 		fwd := ForwardingConfig{
 			RemoteHost:   "dev",
@@ -801,16 +777,19 @@ func TestSendForwardingWithAddressVerification(t *testing.T) {
 		}
 
 		// Don't send any URIs - let it timeout
-		// The test should complete relatively quickly since we reduced the timeout in the code
+		// For specific hostnames, verification timeout should fail
 
 		err = manager.StartForwarding(fwd)
-		// Should succeed even with timeout (it logs a warning and continues)
-		if err != nil {
-			t.Errorf("Expected forwarding to succeed even with verification timeout, got error: %v", err)
+		// Should fail with timeout for specific hostname
+		if err == nil {
+			t.Error("Expected forwarding to fail with verification timeout for specific hostname")
+		}
+		if err != nil && err.Error() != "timeout waiting for address verification for dev" {
+			t.Errorf("Expected timeout error, got: %v", err)
 		}
 	})
 
-	t.Run("wrong hostname triggers retry", func(t *testing.T) {
+	t.Run("wrong hostname fails immediately", func(t *testing.T) {
 		SetupTest(t)
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -861,10 +840,7 @@ func TestSendForwardingWithAddressVerification(t *testing.T) {
 			ConnectTimeout:             5 * time.Second,
 			FwdReqTimeout:              2 * time.Second,
 			KeepAliveInterval:          5 * time.Second,
-			BackoffInterval:            2 * time.Second,
 			RemoteAddrFunc:             remoteAddrFunc,
-			MaxForwardingRetries:       3,
-			ForwardingRetryDelay:       50 * time.Millisecond,
 			AddressVerificationTimeout: 200 * time.Millisecond,
 		}
 
@@ -874,7 +850,9 @@ func TestSendForwardingWithAddressVerification(t *testing.T) {
 		}
 		currentManager = manager
 
-		manager.WaitConnection()
+		if err := manager.Connect(); err != nil {
+			t.Fatalf("Failed to connect: %v", err)
+		}
 
 		fwd := ForwardingConfig{
 			RemoteHost:   "dev", // Requesting "dev" but will get "prod"
@@ -884,17 +862,17 @@ func TestSendForwardingWithAddressVerification(t *testing.T) {
 		}
 
 		err = manager.StartForwarding(fwd)
-		// Should fail after max retries
 		if err == nil {
-			t.Error("Expected error after max retries with wrong hostname")
-		}
-		if err != nil && err.Error() != "failed to get correct hostname after 3 attempts" {
-			t.Errorf("Expected 'failed to get correct hostname' error, got: %v", err)
+			t.Error("Expected error when wrong hostname is assigned")
 		}
 
-		// Verify multiple attempts were made (3 attempts expected)
-		if attemptCount != 3 {
-			t.Errorf("Expected exactly 3 forwarding attempts, got %d", attemptCount)
+		expectedErr := fmt.Errorf("wrong hostname assigned: [https://user-prod.example.com]")
+		if err != nil && err.Error() != expectedErr.Error() {
+			t.Errorf("Expected error %q, got: %q", expectedErr.Error(), err.Error())
+		}
+
+		if attemptCount != 1 {
+			t.Errorf("Expected exactly 1 forwarding attempt, got %d", attemptCount)
 		}
 	})
 }
@@ -929,7 +907,6 @@ func TestSendForwardingRequestTimeout(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     100 * time.Millisecond, // Short timeout
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -937,7 +914,9 @@ func TestSendForwardingRequestTimeout(t *testing.T) {
 		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 	}
 
-	manager.WaitConnection()
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
 
 	fwd := ForwardingConfig{
 		RemoteHost:   "0.0.0.0",
@@ -983,7 +962,6 @@ func TestSendForwardingRequestDenied(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 5 * time.Second,
-		BackoffInterval:   2 * time.Second,
 	}
 
 	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
@@ -991,7 +969,9 @@ func TestSendForwardingRequestDenied(t *testing.T) {
 		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
 	}
 
-	manager.WaitConnection()
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
 
 	fwd := ForwardingConfig{
 		RemoteHost:   "0.0.0.0",
@@ -1041,12 +1021,15 @@ func TestMonitorConnectionWithFailure(t *testing.T) {
 		ConnectTimeout:    5 * time.Second,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: 50 * time.Millisecond, // Fast keepalive for testing
-		BackoffInterval:   2 * time.Second,
 	}
 
-	_, err := NewSSHTunnelManager(ctx, &sshConfig)
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
 	if err != nil {
 		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+	}
+
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Failed to connect: %v", err)
 	}
 
 	// Wait for multiple keepalive attempts
@@ -1054,6 +1037,11 @@ func TestMonitorConnectionWithFailure(t *testing.T) {
 
 	if keepaliveCallCount < 2 {
 		t.Errorf("Expected at least 2 keepalive attempts, got %d", keepaliveCallCount)
+	}
+
+	// Verify connection is closed
+	if manager.IsConnected() {
+		t.Error("Expected manager to be disconnected after keepalive failure")
 	}
 }
 
@@ -1104,10 +1092,7 @@ func TestWildcardForwardingStoresAddresses(t *testing.T) {
 		ConnectTimeout:             5 * time.Second,
 		FwdReqTimeout:              2 * time.Second,
 		KeepAliveInterval:          5 * time.Second,
-		BackoffInterval:            2 * time.Second,
 		RemoteAddrFunc:             remoteAddrFunc,
-		MaxForwardingRetries:       3,
-		ForwardingRetryDelay:       10 * time.Millisecond,
 		AddressVerificationTimeout: 200 * time.Millisecond,
 	}
 
@@ -1117,7 +1102,9 @@ func TestWildcardForwardingStoresAddresses(t *testing.T) {
 	}
 	currentManager = manager
 
-	manager.WaitConnection()
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
 
 	fwd := ForwardingConfig{
 		RemoteHost:   "0.0.0.0", // Wildcard - should skip verification but still store addresses
@@ -1188,10 +1175,7 @@ func TestEmptyHostnameForwardingStoresAddresses(t *testing.T) {
 		ConnectTimeout:             5 * time.Second,
 		FwdReqTimeout:              2 * time.Second,
 		KeepAliveInterval:          5 * time.Second,
-		BackoffInterval:            2 * time.Second,
 		RemoteAddrFunc:             remoteAddrFunc,
-		MaxForwardingRetries:       3,
-		ForwardingRetryDelay:       10 * time.Millisecond,
 		AddressVerificationTimeout: 200 * time.Millisecond,
 	}
 
@@ -1201,7 +1185,9 @@ func TestEmptyHostnameForwardingStoresAddresses(t *testing.T) {
 	}
 	currentManager = manager
 
-	manager.WaitConnection()
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
 
 	fwd := ForwardingConfig{
 		RemoteHost:   "", // Empty hostname - should skip verification but still store addresses

@@ -63,9 +63,6 @@ type SSHConnectionConfig struct {
 	ConnectTimeout             time.Duration
 	FwdReqTimeout              time.Duration
 	KeepAliveInterval          time.Duration
-	BackoffInterval            time.Duration
-	MaxForwardingRetries       int           // Optional: max retries for hostname verification (default: 30)
-	ForwardingRetryDelay       time.Duration // Optional: delay between retries (default: 15s)
 	AddressVerificationTimeout time.Duration // Optional: timeout for address verification (default: 30s)
 }
 
@@ -95,13 +92,10 @@ type SSHTunnelManager struct {
 	sshServerAddress           string
 	fwdReqTimeout              time.Duration
 	connTimeout                time.Duration
-	backoffInterval            time.Duration
 	keepAliveInterval          time.Duration
-	maxForwardingRetries       int
-	forwardingRetryDelay       time.Duration
 	addressVerificationTimeout time.Duration
 	clientMu                   sync.RWMutex
-	addrNotifMu                sync.Mutex
+	addrNotifMu                sync.RWMutex
 	connected                  bool
 }
 
@@ -129,15 +123,6 @@ func NewSSHTunnelManager(externalCtx context.Context, config *SSHConnectionConfi
 		netDialFn = netDial // Use global for backward compatibility
 	}
 
-	// Set timeout values with defaults
-	maxRetries := config.MaxForwardingRetries
-	if maxRetries == 0 {
-		maxRetries = maxForwardingRetries // Use constant default
-	}
-	retryDelay := config.ForwardingRetryDelay
-	if retryDelay == 0 {
-		retryDelay = forwardingRetryDelay
-	}
 	addrVerifyTimeout := config.AddressVerificationTimeout
 	if addrVerifyTimeout == 0 {
 		addrVerifyTimeout = addressVerificationTimeout
@@ -151,9 +136,6 @@ func NewSSHTunnelManager(externalCtx context.Context, config *SSHConnectionConfi
 		connTimeout:                config.ConnectTimeout,
 		fwdReqTimeout:              config.FwdReqTimeout,
 		keepAliveInterval:          config.KeepAliveInterval,
-		backoffInterval:            config.BackoffInterval,
-		maxForwardingRetries:       maxRetries,
-		forwardingRetryDelay:       retryDelay,
 		addressVerificationTimeout: addrVerifyTimeout,
 		externalCtx:                externalCtx,
 		connected:                  false,
@@ -164,110 +146,92 @@ func NewSSHTunnelManager(externalCtx context.Context, config *SSHConnectionConfi
 		sshDialFunc:                sshDialFn,
 		netDialFunc:                netDialFn,
 	}
-	go m.handleConnection()
 
 	return m, nil
 }
 
-// WaitConnection blocks until the ssh connection is established
-func (m *SSHTunnelManager) WaitConnection() error {
-	for {
-		select {
-		case <-m.externalCtx.Done():
-			m.clientMu.Lock()
-			defer m.clientMu.Unlock()
-			m.closeClient()
-			return fmt.Errorf("ssh connection canceled: %w", m.externalCtx.Err())
-		default:
-		}
-		m.clientMu.RLock()
-		connected := m.connected
-		m.clientMu.RUnlock()
-		if connected {
-			break
-		}
-		time.Sleep(connectionWaitPollInterval)
+// Connect attempts to establish the SSH connection.
+// It returns nil if already connected or if connection succeeds.
+func (m *SSHTunnelManager) Connect() error {
+	m.clientMu.Lock()
+	defer m.clientMu.Unlock()
+
+	if m.connected {
+		return nil
 	}
 
+	if err := m.connectClient(); err != nil {
+		return err
+	}
+
+	// Start background tasks
+	go m.handleChannels()
+	go m.monitorConnection()
+
+	slog.With("function", "Connect").Info("ssh connection established")
 	return nil
 }
 
-// handleConnection manages the SSH connection lifecycle and reconnections. Blocks until externalCtx is done.
-func (m *SSHTunnelManager) handleConnection() {
-	for {
-		select {
-		case <-m.externalCtx.Done():
-			m.clientMu.Lock()
-			m.closeClient()
-			m.clientMu.Unlock()
-			return
-		default:
-		}
-
-		m.clientMu.Lock()
-		err := m.connectClient()
-		if err != nil {
-			m.clientMu.Unlock()
-			slog.With("function", "handleConnection").Error("ssh connection failed", "error", err)
-			time.Sleep(m.backoffInterval)
-			continue
-		}
-		slog.With("function", "handleConnection").Debug("ssh connection established")
-
-		// Restart existing forwardings, in case of reconnection
-		for key, forwardingSession := range m.forwardings {
-			slog.With("function", "handleConnection").Debug("restarting forwarding", "key", key)
-			err := m.sendForwarding(forwardingSession, ForwardStart)
-			if err != nil {
-				slog.With("function", "handleConnection").Error("failed to send forwarding request, removing forwarding", "error", err, "key", key)
-				delete(m.forwardings, key)
-				continue
-			}
-		}
-
-		// Handle incoming channels
-		go m.handleChannels()
-
-		m.clientMu.Unlock()
-
-		// Monitor connection (keepalive and disconnect detection)
-		m.monitorConnection()
-
-		m.clientMu.Lock()
-		m.closeClient()
-		m.clientMu.Unlock()
-
-		time.Sleep(m.backoffInterval)
-	}
-}
-
 // monitorConnection monitors the SSH connection and sends keepalive requests.
+// If a keepalive fails, it closes the connection.
 func (m *SSHTunnelManager) monitorConnection() {
 	ticker := time.NewTicker(m.keepAliveInterval)
 	defer ticker.Stop()
+
+	// Capture the context we are monitoring
+	m.clientMu.RLock()
+	ctx := m.connectionCtx
+	m.clientMu.RUnlock()
+
+	if ctx == nil {
+		return
+	}
+
 	for {
 		select {
 		case <-m.externalCtx.Done():
 			return
+		case <-ctx.Done():
+			return
 		case <-ticker.C:
 			m.clientMu.RLock()
-			if m.connectionCtx == nil || m.connectionCtx.Err() != nil {
+			if !m.connected || m.client == nil || m.connectionCtx.Err() != nil {
 				m.clientMu.RUnlock()
-				slog.With("function", "monitorConnection").Debug("ssh connection context canceled")
 				return
 			}
-			if m.client == nil {
-				m.clientMu.RUnlock()
-				slog.With("function", "monitorConnection").Error("ssh client is nil, reconnecting")
-				return
-			}
-			_, _, err := m.client.SendRequest("keepalive@openssh.com", true, nil)
+			client := m.client
 			m.clientMu.RUnlock()
-			if err != nil {
-				slog.With("function", "monitorConnection").Error("ssh keepalive failed, reconnecting", "error", err)
+
+			// Send keepalive with timeout to avoid hanging indefinitely
+			type keepaliveResult struct {
+				err error
+			}
+			resultCh := make(chan keepaliveResult, 1)
+
+			go func() {
+				_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
+				resultCh <- keepaliveResult{err: err}
+			}()
+
+			// Wait for keepalive response with timeout
+			keepaliveTimeout := m.keepAliveInterval * 2 // 2x keepalive interval
+			select {
+			case result := <-resultCh:
+				if result.err != nil {
+					slog.With("function", "monitorConnection").Error("ssh keepalive failed, closing connection", "error", result.err)
+					m.clientMu.Lock()
+					m.closeClient()
+					m.clientMu.Unlock()
+					return
+				}
+				slog.With("function", "monitorConnection").Debug("ssh keepalive sent")
+			case <-time.After(keepaliveTimeout):
+				slog.With("function", "monitorConnection").Error("ssh keepalive timeout, closing connection", "timeout", keepaliveTimeout)
+				m.clientMu.Lock()
+				m.closeClient()
+				m.clientMu.Unlock()
 				return
 			}
-			slog.With("function", "monitorConnection").Debug("ssh keepalive sent")
 		}
 	}
 }
@@ -275,6 +239,9 @@ func (m *SSHTunnelManager) monitorConnection() {
 // closeClient closes the current SSH client connection.
 // Must be called with a write lock on m.clientMu
 func (m *SSHTunnelManager) closeClient() {
+	if !m.connected {
+		return
+	}
 	m.connected = false
 
 	if m.connectionCancel != nil {
@@ -287,6 +254,14 @@ func (m *SSHTunnelManager) closeClient() {
 	}
 	m.client = nil
 	m.connectionCancel = nil
+
+	// Clear assigned addresses as they are invalid on disconnect
+	m.addrNotifMu.Lock()
+	m.assignedAddrs = make(map[string][]string)
+	m.addrNotifMu.Unlock()
+
+	// Clear forwardings as they need to be re-established
+	m.forwardings = make(map[string]*ForwardingConfig)
 }
 
 type channelForwardMsg struct {
@@ -371,8 +346,8 @@ func (m *SSHTunnelManager) StopForwarding(fwd *ForwardingConfig) error {
 // Returns nil if no addresses have been assigned yet or the forwarding doesn't exist.
 func (m *SSHTunnelManager) GetAssignedAddresses(remoteHost string, remotePort int) []string {
 	key := forwardingKey(remoteHost, remotePort)
-	m.addrNotifMu.Lock()
-	defer m.addrNotifMu.Unlock()
+	m.addrNotifMu.RLock()
+	defer m.addrNotifMu.RUnlock()
 
 	if addrs, ok := m.assignedAddrs[key]; ok {
 		// Return a copy to avoid race conditions
@@ -381,6 +356,13 @@ func (m *SSHTunnelManager) GetAssignedAddresses(remoteHost string, remotePort in
 		return result
 	}
 	return nil
+}
+
+// IsConnected checks if the SSH client is connected.
+func (m *SSHTunnelManager) IsConnected() bool {
+	m.clientMu.RLock()
+	defer m.clientMu.RUnlock()
+	return m.connected
 }
 
 // ForwardRequest is the type of forwarding request to send.
@@ -393,10 +375,7 @@ const (
 
 // Constants for forwarding retry and verification logic
 const (
-	maxForwardingRetries        = 30
-	forwardingRetryDelay        = 15 * time.Second
 	addressVerificationTimeout  = 30 * time.Second
-	connectionWaitPollInterval  = 100 * time.Millisecond
 	addrNotificationChannelSize = 5
 )
 
@@ -430,106 +409,88 @@ func matchesRequestedHost(uris []string, requestedHost string, requestedPort int
 // sendForwarding sends a request to the SSH server to start or cancel a TCP forwarding.
 // 'req' controls the request: ForwardStart -> "tcpip-forward", ForwardCancel -> "cancel-tcpip-forward".
 // For ForwardStart requests, it waits for the SSH server to report the assigned address and verifies
-// it matches the requested hostname. If a mismatch is detected, it retries the request.
+// it matches the requested hostname.
 // It returns an error if the request fails or is denied by the server.
 // Must be called with a lock on m.clientMu
 func (m *SSHTunnelManager) sendForwarding(fwd *ForwardingConfig, req ForwardRequest) error {
-	for attempt := 0; attempt < m.maxForwardingRetries; attempt++ {
-		if attempt > 0 {
-			slog.With("function", "sendForwarding").Info("retrying forwarding request",
-				"attempt", attempt+1, "max_retries", m.maxForwardingRetries, "remote_host", fwd.RemoteHost)
-			time.Sleep(m.forwardingRetryDelay)
-		}
+	// Send the request once
+	err := m.sendForwardingOnce(fwd, req)
+	if err != nil {
+		return err
+	}
 
-		err := m.sendForwardingOnce(fwd, req)
-		if err != nil {
-			return err
-		}
+	// For ForwardCancel, we're done after successful request
+	if req == ForwardCancel {
+		return nil
+	}
 
-		// For ForwardCancel, we're done after successful request
-		if req == ForwardCancel {
-			return nil
-		}
+	// For ForwardStart, collect assigned addresses (if remoteAddrFunc is available)
+	if m.remoteAddrFunc != nil {
+		key := forwardingKey(fwd.RemoteHost, fwd.RemotePort)
 
-		// For ForwardStart, collect assigned addresses (if remoteAddrFunc is available)
-		if m.remoteAddrFunc != nil {
-			key := forwardingKey(fwd.RemoteHost, fwd.RemotePort)
+		// Register for address notifications
+		notifCh := make(chan []string, addrNotificationChannelSize)
+		m.addrNotifMu.Lock()
+		m.addrNotifications[key] = notifCh
+		m.addrNotifMu.Unlock()
 
-			// Register for address notifications
-			notifCh := make(chan []string, addrNotificationChannelSize)
-			m.addrNotifMu.Lock()
-			m.addrNotifications[key] = notifCh
-			m.addrNotifMu.Unlock()
-
-			// Wait for address assignment with timeout
-			verifyCtx, verifyCancel := context.WithTimeout(m.externalCtx, m.addressVerificationTimeout)
-			matched := false
-			needsVerification := fwd.RemoteHost != "" && fwd.RemoteHost != "0.0.0.0"
-
-		waitLoop:
-			for {
-				select {
-				case <-verifyCtx.Done():
-					verifyCancel()
-					if needsVerification {
-						// Timeout waiting for address - continue anyway
-						slog.With("function", "sendForwarding").Warn("timeout waiting for address verification, continuing anyway",
-							"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
-					}
-					matched = true
-					break waitLoop
-				case uris := <-notifCh:
-					if needsVerification {
-						// Verify hostname matches for specific hostnames
-						if matchesRequestedHost(uris, fwd.RemoteHost, fwd.RemotePort) {
-							slog.With("function", "sendForwarding").Info("verified correct hostname assigned",
-								"remote_host", fwd.RemoteHost, "uris", uris)
-							matched = true
-							// Store the assigned addresses
-							m.addrNotifMu.Lock()
-							m.assignedAddrs[key] = uris
-							m.addrNotifMu.Unlock()
-							verifyCancel()
-							break waitLoop
-						} else {
-							slog.With("function", "sendForwarding").Warn("wrong hostname assigned, will retry",
-								"requested_host", fwd.RemoteHost, "received_uris", uris, "attempt", attempt+1)
-							verifyCancel()
-							// Cancel this forwarding and retry
-							_ = m.sendForwardingOnce(fwd, ForwardCancel)
-							break waitLoop
-						}
-					} else {
-						// For wildcard (0.0.0.0), just store whatever address we got
-						slog.With("function", "sendForwarding").Debug("storing assigned addresses for wildcard forwarding",
-							"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort, "uris", uris)
-						m.addrNotifMu.Lock()
-						m.assignedAddrs[key] = uris
-						m.addrNotifMu.Unlock()
-						verifyCancel()
-						matched = true
-						break waitLoop
-					}
-				}
-			}
-
-			// Cleanup notification channel
+		defer func() {
 			m.addrNotifMu.Lock()
 			delete(m.addrNotifications, key)
 			m.addrNotifMu.Unlock()
 			close(notifCh)
+		}()
 
-			if matched {
+		// Wait for address assignment with timeout
+		verifyCtx, verifyCancel := context.WithTimeout(m.externalCtx, m.addressVerificationTimeout)
+		defer verifyCancel()
+
+		needsVerification := fwd.RemoteHost != "" && fwd.RemoteHost != "0.0.0.0"
+
+		select {
+		case <-verifyCtx.Done():
+			if needsVerification {
+				// Timeout waiting for address
+				return fmt.Errorf("timeout waiting for address verification for %s", fwd.RemoteHost)
+			}
+			// For wildcard/generic, we might proceed without specific verification if timeout hits,
+			// but usually we expect *some* address.
+			slog.With("function", "sendForwarding").Warn("timeout waiting for address verification",
+				"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
+			return nil
+
+		case uris := <-notifCh:
+			if needsVerification {
+				// Verify hostname matches for specific hostnames
+				if matchesRequestedHost(uris, fwd.RemoteHost, fwd.RemotePort) {
+					slog.With("function", "sendForwarding").Info("verified correct hostname assigned",
+						"remote_host", fwd.RemoteHost, "uris", uris)
+					// Store the assigned addresses
+					m.addrNotifMu.Lock()
+					m.assignedAddrs[key] = uris
+					m.addrNotifMu.Unlock()
+					return nil
+				} else {
+					slog.With("function", "sendForwarding").Warn("wrong hostname assigned",
+						"requested_host", fwd.RemoteHost, "received_uris", uris)
+					// Cancel this forwarding
+					_ = m.sendForwardingOnce(fwd, ForwardCancel)
+					return fmt.Errorf("wrong hostname assigned: %v", uris)
+				}
+			} else {
+				// For wildcard (0.0.0.0), just store whatever address we got
+				slog.With("function", "sendForwarding").Debug("storing assigned addresses for wildcard forwarding",
+					"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort, "uris", uris)
+				m.addrNotifMu.Lock()
+				m.assignedAddrs[key] = uris
+				m.addrNotifMu.Unlock()
 				return nil
 			}
-			// Continue to next retry attempt
-		} else {
-			// No remoteAddrFunc provided, can't collect addresses
-			return nil
 		}
 	}
 
-	return fmt.Errorf("failed to get correct hostname after %d attempts", m.maxForwardingRetries)
+	// No remoteAddrFunc provided, assume success
+	return nil
 }
 
 // sendForwardingOnce sends a single forwarding request without retry logic.
@@ -604,7 +565,8 @@ func (m *SSHTunnelManager) Stop() {
 			}
 		}
 	}
-	m.forwardings = make(map[string]*ForwardingConfig) // Clear forwardings map
+	// Clear forwardings map
+	m.forwardings = make(map[string]*ForwardingConfig)
 
 	m.closeClient()
 
@@ -624,7 +586,7 @@ func (m *SSHTunnelManager) handleChannels() {
 	m.clientMu.RUnlock()
 
 	for {
-		slog.Debug("waiting for new channels")
+		// slog.Debug("waiting for new channels")
 		select {
 		case <-connectionCtx.Done():
 			slog.With("function", "handleChannels").Debug("connection context canceled, stopping channel handling")
@@ -782,15 +744,8 @@ func (m *SSHTunnelManager) connectClient() error {
 // It reads from the server's stdout and applies the remoteAddrFunc to extract URIs from the output.
 // This function runs in a goroutine and will stop when the connection context is done.
 func (m *SSHTunnelManager) captureServerOutput() {
-	realClient, ok := m.client.(*ssh.Client)
-	if !ok {
-		slog.With("function", "captureServerOutput").Warn("cannot capture server output, client is not *ssh.Client")
-		return
-	}
-
-	session, err := realClient.NewSession()
+	session, err := m.createSSHSession()
 	if err != nil {
-		slog.With("function", "captureServerOutput").Error("failed to create SSH session", "error", err)
 		return
 	}
 	defer func() {
@@ -810,47 +765,92 @@ func (m *SSHTunnelManager) captureServerOutput() {
 		return
 	}
 
-	go func() {
-		buf := make([]byte, 4096)
-		for {
+	go m.readServerOutput(stdout)
+
+	<-m.connectionCtx.Done()
+	_ = session.Close() // #nosec G104 -- Cleanup on shutdown, error not actionable
+}
+
+// createSSHSession creates a new SSH session from the current client.
+func (m *SSHTunnelManager) createSSHSession() (*ssh.Session, error) {
+	realClient, ok := m.client.(*ssh.Client)
+	if !ok {
+		slog.With("function", "captureServerOutput").Warn("cannot capture server output, client is not *ssh.Client")
+		return nil, fmt.Errorf("client is not *ssh.Client")
+	}
+
+	session, err := realClient.NewSession()
+	if err != nil {
+		slog.With("function", "captureServerOutput").Error("failed to create SSH session", "error", err)
+		return nil, err
+	}
+
+	return session, nil
+}
+
+// readServerOutput reads and processes output from the SSH server.
+func (m *SSHTunnelManager) readServerOutput(stdout io.Reader) {
+	buf := make([]byte, 4096)
+	for {
+		select {
+		case <-m.connectionCtx.Done():
+			slog.With("function", "captureServerOutput").Debug("connection context canceled, stopping server output capture")
+			return
+		default:
 			n, err := stdout.Read(buf)
 			if err != nil {
 				if err != io.EOF {
 					slog.With("function", "captureServerOutput", "stream", "stdout").Error("read error", "error", err)
 				}
-				break
+				return
 			}
 			if n > 0 {
-				data := string(buf[:n])
-				slog.With("function", "captureServerOutput", "stream", "stdout").Debug(data)
-
-				uris, err := m.remoteAddrFunc(data)
-				if err != nil {
-					slog.With("function", "captureServerOutput", "stream", "stdout").Error("failed to extract URIs from data", "error", err)
-					continue
-				}
-				slog.With("function", "captureServerOutput", "stream", "stdout").Debug("extracted URIs from server output", "uris_count", len(uris))
-				for _, uri := range uris {
-					slog.With("function", "captureServerOutput", "stream", "stdout").Info("extracted URI from server output", "uri", uri)
-				}
-
-				// Notify any waiting goroutines about the extracted URIs
-				if len(uris) > 0 {
-					m.addrNotifMu.Lock()
-					for key, ch := range m.addrNotifications {
-						select {
-						case ch <- uris:
-							slog.With("function", "captureServerOutput").Debug("notified waiter about addresses", "key", key, "uris", uris)
-						default:
-							// Channel full or no receiver, skip
-						}
-					}
-					m.addrNotifMu.Unlock()
-				}
+				m.processServerData(buf[:n])
 			}
 		}
-	}()
+	}
+}
 
-	<-m.connectionCtx.Done()
-	_ = session.Close() // #nosec G104 -- Cleanup on shutdown, error not actionable
+// processServerData extracts URIs from server output and notifies waiting goroutines.
+func (m *SSHTunnelManager) processServerData(data []byte) {
+	dataStr := string(data)
+	slog.With("function", "captureServerOutput", "stream", "stdout").Debug(dataStr)
+
+	uris, err := m.remoteAddrFunc(dataStr)
+	if err != nil {
+		slog.With("function", "captureServerOutput", "stream", "stdout").Error("failed to extract URIs from data", "error", err)
+		return
+	}
+
+	if len(uris) == 0 {
+		return
+	}
+
+	slog.With("function", "captureServerOutput", "stream", "stdout").Debug("extracted URIs from server output", "uris_count", len(uris))
+	for _, uri := range uris {
+		slog.With("function", "captureServerOutput", "stream", "stdout").Info("extracted URI from server output", "uri", uri)
+	}
+
+	m.notifyURIWaiters(uris)
+}
+
+// notifyURIWaiters sends extracted URIs to all registered notification channels.
+func (m *SSHTunnelManager) notifyURIWaiters(uris []string) {
+	// Copy channels under read lock to avoid holding lock during I/O
+	m.addrNotifMu.RLock()
+	channels := make(map[string]chan []string, len(m.addrNotifications))
+	for key, ch := range m.addrNotifications {
+		channels[key] = ch
+	}
+	m.addrNotifMu.RUnlock()
+
+	// Send to channels outside the lock
+	for key, ch := range channels {
+		select {
+		case ch <- uris:
+			slog.With("function", "captureServerOutput").Debug("notified waiter about addresses", "key", key, "uris", uris)
+		default:
+			// Channel full or no receiver, skip
+		}
+	}
 }
