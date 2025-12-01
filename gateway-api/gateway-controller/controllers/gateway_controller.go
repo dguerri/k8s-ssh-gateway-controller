@@ -421,42 +421,11 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				return ctrl.Result{}, err
 			}
 		}
-		err := r.handleAddOrUpdateGateway(ctx, &k8sGw)
-		if err != nil {
+		if err := r.handleAddOrUpdateGateway(ctx, &k8sGw); err != nil {
 			return ctrl.Result{}, err
 		}
-		// Update Gateway status with Accepted=True and Programmed=True
-		apiMeta.SetStatusCondition(&k8sGw.Status.Conditions, metav1.Condition{
-			Type:               string(gatewayv1.GatewayConditionAccepted),
-			Status:             metav1.ConditionTrue,
-			Reason:             "Accepted",
-			Message:            "Gateway accepted by controller",
-			LastTransitionTime: metav1.Now(),
-		})
-		apiMeta.SetStatusCondition(&k8sGw.Status.Conditions, metav1.Condition{
-			Type:               string(gatewayv1.GatewayConditionProgrammed),
-			Status:             metav1.ConditionTrue,
-			Reason:             "Programmed",
-			Message:            "Gateway programmed successfully",
-			LastTransitionTime: metav1.Now(),
-		})
-
-		// Populate status.addresses with actual assigned addresses from SSH tunnels
-		oldAddresses := k8sGw.Status.Addresses
-		r.updateGatewayAddresses(&k8sGw)
-
-		// Only update status if addresses have changed
-		if !gatewayAddressesEqual(oldAddresses, k8sGw.Status.Addresses) {
-			slog.With("function", "Reconcile").Debug("gateway addresses changed, updating status",
-				"gateway", key,
-				"oldAddresses", len(oldAddresses),
-				"newAddresses", len(k8sGw.Status.Addresses))
-			if err := r.Status().Update(ctx, &k8sGw); err != nil {
-				slog.With("function", "Reconcile").Error("failed to update Gateway status", "gateway", key, "error", err)
-				return ctrl.Result{}, err
-			}
-		} else {
-			slog.With("function", "Reconcile").Debug("gateway addresses unchanged, skipping status update", "gateway", key)
+		if err := r.updateGatewayStatusIfChanged(ctx, &k8sGw, key); err != nil {
+			return ctrl.Result{}, err
 		}
 	} else {
 		// Handle deletion
@@ -585,6 +554,46 @@ func (r *GatewayReconciler) updateGatewayStatus(ctx context.Context, gwNamespace
 	}
 
 	slog.With("function", "updateGatewayStatus").Debug("updated Gateway status with addresses", "gateway", gwKey)
+	return nil
+}
+
+// updateGatewayStatusIfChanged updates the Gateway status in K8s if either conditions or addresses changed.
+// This ensures both conditions and addresses are persisted when they change, while avoiding unnecessary API calls.
+func (r *GatewayReconciler) updateGatewayStatusIfChanged(ctx context.Context, k8sGw *gatewayv1.Gateway, key string) error {
+	// Update Gateway status with Accepted=True and Programmed=True
+	conditionsChanged := apiMeta.SetStatusCondition(&k8sGw.Status.Conditions, metav1.Condition{
+		Type:               string(gatewayv1.GatewayConditionAccepted),
+		Status:             metav1.ConditionTrue,
+		Reason:             "Accepted",
+		Message:            "Gateway accepted by controller",
+		LastTransitionTime: metav1.Now(),
+	})
+	conditionsChanged = apiMeta.SetStatusCondition(&k8sGw.Status.Conditions, metav1.Condition{
+		Type:               string(gatewayv1.GatewayConditionProgrammed),
+		Status:             metav1.ConditionTrue,
+		Reason:             "Programmed",
+		Message:            "Gateway programmed successfully",
+		LastTransitionTime: metav1.Now(),
+	}) || conditionsChanged
+
+	// Populate status.addresses with actual assigned addresses from SSH tunnels
+	oldAddresses := k8sGw.Status.Addresses
+	r.updateGatewayAddresses(k8sGw)
+	addressesChanged := !gatewayAddressesEqual(oldAddresses, k8sGw.Status.Addresses)
+
+	// Only update status if conditions or addresses have changed
+	if conditionsChanged || addressesChanged {
+		slog.With("function", "updateGatewayStatusIfChanged").Debug("gateway status changed, updating",
+			"gateway", key,
+			"conditionsChanged", conditionsChanged,
+			"addressesChanged", addressesChanged)
+		if err := r.Status().Update(ctx, k8sGw); err != nil {
+			slog.With("function", "updateGatewayStatusIfChanged").Error("failed to update Gateway status", "gateway", key, "error", err)
+			return err
+		}
+	} else {
+		slog.With("function", "updateGatewayStatusIfChanged").Debug("gateway status unchanged, skipping update", "gateway", key)
+	}
 	return nil
 }
 
