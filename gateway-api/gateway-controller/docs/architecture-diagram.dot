@@ -1,0 +1,219 @@
+digraph SSHGatewayController {
+    // Graph settings
+    rankdir=TB;
+    compound=true;
+    newrank=true;
+    splines=ortho;
+    nodesep=0.5;
+    ranksep=0.8;
+
+    // Style definitions
+    node [shape=box, style="rounded,filled", fontname="Arial", fontsize=11];
+    edge [fontname="Arial", fontsize=9];
+
+    // Kubernetes Resources Layer
+    subgraph cluster_k8s {
+        label="Kubernetes Resources";
+        style=filled;
+        color=lightgrey;
+
+        GatewayClass [label="GatewayClass\n(CRD)", fillcolor="#E1F5FE"];
+        Gateway [label="Gateway\n(CRD)", fillcolor="#E1F5FE"];
+        HTTPRoute [label="HTTPRoute\n(CRD)", fillcolor="#E1F5FE"];
+        TCPRoute [label="TCPRoute\n(CRD)", fillcolor="#E1F5FE"];
+
+        {rank=same; GatewayClass; Gateway; HTTPRoute; TCPRoute}
+    }
+
+    // Controller Layer
+    subgraph cluster_controllers {
+        label="Controller Layer (main.go bootstrap)";
+        style=filled;
+        color="#FFF9C4";
+
+        // Gateway Controller
+        subgraph cluster_gateway_controller {
+            label="Gateway Controller";
+            style="rounded,filled";
+            color="#C8E6C9";
+
+            GWReconcile [label="Reconcile()\n• Watch Gateway events\n• Periodic: 30s", fillcolor="#A5D6A7"];
+            GWSetRoute [label="SetRoute()\n• Validate forwarding\n• Setup if needed", fillcolor="#A5D6A7"];
+            GWRemoveRoute [label="RemoveRoute()\n• Stop forwarding\n• Update status", fillcolor="#A5D6A7"];
+            GWSetupRouteForwarding [label="setupRouteForwarding()\n• Stop old forwarding\n• Start new forwarding", fillcolor="#A5D6A7"];
+            GWHandleForwardingError [label="handleForwardingError()\n• Handle NotReady\n• Handle AlreadyExists\n• Adopt or fail", fillcolor="#A5D6A7"];
+            GWIsForwardingValid [label="isForwardingValid()\n• Check addresses exist\n• Verify hostname match", fillcolor="#A5D6A7"];
+            GWHandleAdd [label="handleAddOrUpdateGateway()\n• Parse listeners\n• Connect SSH", fillcolor="#A5D6A7"];
+            GWHandleDelete [label="handleDeleteGateway()\n• Disconnect SSH\n• Clean state", fillcolor="#A5D6A7"];
+            GWUpdateStatus [label="updateGatewayStatus()\n• Update addresses\n• Update conditions", fillcolor="#A5D6A7"];
+
+            // Internal state
+            GWState [label="Internal State\n• gateways map\n• listeners map\n• routes", shape=cylinder, fillcolor="#E8F5E9"];
+        }
+
+        // HTTPRoute Controller
+        subgraph cluster_http_controller {
+            label="HTTPRoute Controller";
+            style="rounded,filled";
+            color="#BBDEFB";
+
+            HTTPReconcile [label="Reconcile()\n• Watch HTTPRoute events\n• Periodic: 10s\n• Create/Update → SetRoute()\n• Delete → RemoveRoute()", fillcolor="#90CAF9"];
+            HTTPExtract [label="extractHTTPRouteDetails()\n• Parse route spec\n• Extract backend", fillcolor="#90CAF9"];
+        }
+
+        // TCPRoute Controller
+        subgraph cluster_tcp_controller {
+            label="TCPRoute Controller";
+            style="rounded,filled";
+            color="#BBDEFB";
+
+            TCPReconcile [label="Reconcile()\n• Watch TCPRoute events\n• Periodic: 10s\n• Create/Update → SetRoute()\n• Delete → RemoveRoute()", fillcolor="#90CAF9"];
+            TCPExtract [label="extractTCPRouteDetails()\n• Parse route spec\n• Extract backend", fillcolor="#90CAF9"];
+        }
+    }
+
+    // SSH Manager Layer
+    subgraph cluster_ssh {
+        label="SSH Tunnel Manager";
+        style=filled;
+        color="#FFE0B2";
+
+        SSHConnect [label="Connect()\n• Auth via key/password\n• Start monitor", fillcolor="#FFCC80"];
+        SSHMonitor [label="monitorConnection()\n• Send keepalives\n• Detect disconnects\n• Close on failure", fillcolor="#FFCC80"];
+        SSHStartForwarding [label="StartForwarding()\n• Send tcpip-forward\n• Validate hostname\n• Store addresses", fillcolor="#FFCC80"];
+        SSHStopForwarding [label="StopForwarding()\n• Send cancel-tcpip\n• Clean state", fillcolor="#FFCC80"];
+        SSHGetAddresses [label="GetAssignedAddresses()\n• Read-only lookup\n• RLock for concurrency", fillcolor="#FFCC80"];
+        SSHIsConnected [label="IsConnected()\n• Check client state", fillcolor="#FFCC80"];
+        SSHHandleChannels [label="handleChannels()\n• Accept connections\n• Proxy to backend", fillcolor="#FFCC80"];
+        SSHCaptureOutput [label="captureServerOutput()\n• Parse URIs\n• Notify waiters", fillcolor="#FFCC80"];
+
+        // Internal state
+        SSHState [label="SSH State\n• client (ssh.Client)\n• forwardings map\n• assignedAddrs map", shape=cylinder, fillcolor="#FFF3E0"];
+    }
+
+    // External Systems
+    subgraph cluster_external {
+        label="External Systems";
+        style=filled;
+        color="#F3E5F5";
+
+        SSHServer [label="SSH Server\n(pico.sh, tuns.sh)\n• Reverse forwarding\n• Assign hostnames", fillcolor="#E1BEE7"];
+        K8sBackend [label="Kubernetes Service\n(Backend)\n• Internal service\n• ClusterIP", fillcolor="#E1BEE7"];
+        Internet [label="Internet\nTraffic", fillcolor="#E1BEE7", shape=ellipse];
+    }
+
+    // K8s API
+    K8sAPI [label="Kubernetes API", fillcolor="#FFEBEE", shape=ellipse];
+
+    // ========================================
+    // RELATIONSHIPS - Kubernetes Resources
+    // ========================================
+
+    Gateway -> GWReconcile [label="watch", style=dashed, color=blue];
+    HTTPRoute -> HTTPReconcile [label="watch", style=dashed, color=blue];
+    TCPRoute -> TCPReconcile [label="watch", style=dashed, color=blue];
+    GatewayClass -> K8sAPI [label="validate", style=dotted];
+
+    // ========================================
+    // RELATIONSHIPS - Gateway Controller Flow
+    // ========================================
+    // Color: #2196F3 = Kubernetes events
+    // Color: #4CAF50 = Setup/Create flows
+    // Color: #F44336 = Teardown/Delete flows
+    // Color: #FF9800 = SSH operations
+    // Color: #9C27B0 = Periodic/monitoring
+
+    GWReconcile -> GWHandleAdd [label="create/update", color="#4CAF50"];
+    GWReconcile -> GWHandleDelete [label="delete", color="#F44336"];
+    GWReconcile -> SSHIsConnected [label="check\nperiodic", color="#9C27B0", style=dashed];
+    GWReconcile -> SSHConnect [label="reconnect\nif down", color="#FF9800"];
+
+    GWHandleAdd -> SSHConnect [label="1. establish\nconnection", color="#FF9800"];
+    GWHandleAdd -> GWState [label="2. populate\nregistry", color="#4CAF50"];
+
+    GWHandleDelete -> SSHStopForwarding [label="1. stop all\nforwardings", color="#F44336"];
+    GWHandleDelete -> GWState [label="2. clean\nstate", color="#F44336"];
+
+    GWSetRoute -> GWIsForwardingValid [label="1. validate\nexisting", color="#9C27B0"];
+    GWSetRoute -> GWSetupRouteForwarding [label="2. setup\nif needed", color="#4CAF50"];
+    GWSetRoute -> GWUpdateStatus [label="3. update\nstatus", color="#2196F3"];
+    GWSetRoute -> GWState [label="update", color="#4CAF50"];
+
+    GWSetupRouteForwarding -> SSHIsConnected [label="pre-check", color="#9C27B0"];
+    GWSetupRouteForwarding -> SSHStartForwarding [label="start", color="#FF9800"];
+    GWSetupRouteForwarding -> GWHandleForwardingError [label="on error", color="#F44336"];
+
+    GWIsForwardingValid -> SSHGetAddresses [label="query", color="#9C27B0"];
+
+    GWRemoveRoute -> SSHStopForwarding [label="stop", color="#F44336"];
+    GWRemoveRoute -> GWUpdateStatus [label="update", color="#2196F3"];
+    GWRemoveRoute -> GWState [label="clean", color="#F44336"];
+
+    GWUpdateStatus -> SSHGetAddresses [label="get URIs", color="#9C27B0"];
+    GWUpdateStatus -> K8sAPI [label="update", color="#2196F3"];
+
+    // ========================================
+    // RELATIONSHIPS - Route Controllers
+    // ========================================
+
+    HTTPReconcile -> HTTPExtract [label="1. parse", color="#9C27B0"];
+    HTTPReconcile -> GWSetRoute [label="2. create/update\nsetup forwarding", color="#4CAF50"];
+    HTTPReconcile -> GWRemoveRoute [label="3. delete\nremove forwarding", color="#F44336"];
+
+    TCPReconcile -> TCPExtract [label="1. parse", color="#9C27B0"];
+    TCPReconcile -> GWSetRoute [label="2. create/update\nsetup forwarding", color="#4CAF50"];
+    TCPReconcile -> GWRemoveRoute [label="3. delete\nremove forwarding", color="#F44336"];
+
+    // ========================================
+    // RELATIONSHIPS - SSH Manager Internal
+    // ========================================
+
+    SSHConnect -> SSHMonitor [label="start\ngoroutine", color="#FF9800"];
+    SSHConnect -> SSHHandleChannels [label="start\ngoroutine", color="#FF9800"];
+    SSHConnect -> SSHCaptureOutput [label="start\ngoroutine", color="#FF9800"];
+    SSHConnect -> SSHState [label="init", color="#4CAF50"];
+
+    SSHMonitor -> SSHState [label="close\nconnection\non fail", color="#F44336"];
+
+    SSHStartForwarding -> SSHServer [label="tcpip-forward\nrequest", color="#FF9800", penwidth=2];
+    SSHStartForwarding -> SSHCaptureOutput [label="wait URIs", style=dashed, color="#9C27B0"];
+    SSHStartForwarding -> SSHState [label="store", color="#4CAF50"];
+
+    SSHStopForwarding -> SSHServer [label="cancel-tcpip\nrequest", color="#F44336", penwidth=2];
+    SSHStopForwarding -> SSHState [label="remove", color="#F44336"];
+
+    SSHGetAddresses -> SSHState [label="read\n(RLock)", color="#9C27B0"];
+
+    SSHHandleChannels -> K8sBackend [label="proxy\nconnection", color="#4CAF50", penwidth=2];
+
+    SSHCaptureOutput -> SSHState [label="update\nassigned URIs", color="#4CAF50"];
+
+    // ========================================
+    // RELATIONSHIPS - External Systems
+    // ========================================
+
+    SSHServer -> Internet [label="expose", color="#9C27B0", penwidth=2];
+    Internet -> SSHServer [label="requests", color="#4CAF50", penwidth=2];
+    SSHServer -> SSHHandleChannels [label="new\nchannels", color="#4CAF50", penwidth=2];
+
+    // Periodic reconciliation annotations
+    {rank=same; GWReconcile; HTTPReconcile; TCPReconcile}
+
+    // Legend
+    subgraph cluster_legend {
+        label="Color Legend";
+        style=filled;
+        color=white;
+
+        leg1 [label="Setup/Create", shape=box, style="filled", fillcolor="#4CAF50"];
+        leg2 [label="Delete/Teardown", shape=box, style="filled", fillcolor="#F44336"];
+        leg3 [label="SSH Operations", shape=box, style="filled", fillcolor="#FF9800"];
+        leg4 [label="Monitoring/Validation", shape=box, style="filled", fillcolor="#9C27B0"];
+        leg5 [label="K8s API Updates", shape=box, style="filled", fillcolor="#2196F3"];
+
+        leg1 -> leg2 [style=invis];
+        leg2 -> leg3 [style=invis];
+        leg3 -> leg4 [style=invis];
+        leg4 -> leg5 [style=invis];
+    }
+}
