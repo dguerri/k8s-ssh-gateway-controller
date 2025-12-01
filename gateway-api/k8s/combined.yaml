@@ -26,6 +26,7 @@ data:
   SSH_SERVER: "tuns.sh:22"
   SSH_USERNAME: "tunnel-user"
   GATEWAY_CONTROLLER_NAME: "pico.sh/ssh-gateway-api-controller"
+  SLOG_LEVEL: "DEBUG"
 
 ---
 # ServiceAccount used by the SSH Gateway API controller to interact with the Kubernetes API
@@ -42,24 +43,24 @@ kind: ClusterRole
 metadata:
   name: ssh-gateway-api-controller-cr
 rules:
-- apiGroups: ["gateway.networking.k8s.io"]
-  resources: ["gateways"]
-  verbs: ["get", "list", "watch", "update", "patch"]
-- apiGroups: ["gateway.networking.k8s.io"]
-  resources: ["tcproutes"]
-  verbs: ["get", "list", "watch", "update", "patch"]
-- apiGroups: ["gateway.networking.k8s.io"]
-  resources: ["httproutes"]
-  verbs: ["get", "list", "watch", "update", "patch"]
-- apiGroups: ["gateway.networking.k8s.io"]
-  resources: ["gatewayclasses"]
-  verbs: ["get", "list", "watch", "update", "patch"]
-- apiGroups: ["gateway.networking.k8s.io"]
-  resources: ["gateways/status"]
-  verbs: ["update", "patch"]
-- apiGroups: ["gateway.networking.k8s.io"]
-  resources: ["gatewayclasses/status"]
-  verbs: ["update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["tcproutes"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways/status"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses/status"]
+    verbs: ["update", "patch"]
 
 ---
 # Binds the ClusterRole to the ServiceAccount in the ssh-gateway-system namespace
@@ -68,9 +69,9 @@ kind: ClusterRoleBinding
 metadata:
   name: ssh-gateway-api-controller-crb
 subjects:
-- kind: ServiceAccount
-  name: ssh-gateway-api-controller-sa
-  namespace: ssh-gateway-system
+  - kind: ServiceAccount
+    name: ssh-gateway-api-controller-sa
+    namespace: ssh-gateway-system
 roleRef:
   kind: ClusterRole
   name: ssh-gateway-api-controller-cr
@@ -103,30 +104,41 @@ spec:
       labels:
         app: ssh-gateway-api-controller
     spec:
+      # Tolerations to allow scheduling on master/control-plane nodes
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      # Require scheduling on a control-plane node
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
       securityContext:
-        runAsUser: 65532    # nonroot
-        runAsGroup: 65532   # nonroot
-        fsGroup: 65532      # nonroot
+        runAsUser: 65532 # nonroot
+        runAsGroup: 65532 # nonroot
+        fsGroup: 65532 # nonroot
       serviceAccountName: ssh-gateway-api-controller-sa
       containers:
-      - name: controller
-        image: <your-registry>/ssh-gateway-api-controller:latest
-        envFrom:
-        - configMapRef:
-            name: pico-sh-gateway-controller-config
-        volumeMounts:
-        - name: ssh-key
-          mountPath: /ssh
-          readOnly: true
-        resources:
-          limits:
-            cpu: 100m
-            memory: 128Mi
-          requests:
-            cpu: 50m
-            memory: 64Mi
+        - name: controller
+          image: <your-registry>/ssh-gateway-api-controller:latest
+          envFrom:
+            - configMapRef:
+                name: pico-sh-gateway-controller-config
+          volumeMounts:
+            - name: ssh-key
+              mountPath: /ssh
+              readOnly: true
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
       volumes:
-      - name: ssh-key
-        secret:
-          secretName: pico-sh-gateway-ssh-key
-          defaultMode: 256 # 0400 octal
+        - name: ssh-key
+          secret:
+            secretName: pico-sh-gateway-ssh-key
+            defaultMode: 256 # 0400 octal
