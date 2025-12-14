@@ -736,3 +736,18 @@ func RegisterGatewayClassController(mgr ctrl.Manager) error {
 			Scheme: mgr.GetScheme(),
 		})
 }
+
+// IsGatewayManaged checks if the Gateway referenced by the route is managed by this controller.
+func IsGatewayManaged(ctx context.Context, c client.Client, gwNamespace, gwName string) (bool, error) {
+	var gw gatewayv1.Gateway
+	if err := c.Get(ctx, client.ObjectKey{Namespace: gwNamespace, Name: gwName}, &gw); err != nil {
+		return false, err
+	}
+
+	var gc gatewayv1.GatewayClass
+	if err := c.Get(ctx, client.ObjectKey{Name: string(gw.Spec.GatewayClassName)}, &gc); err != nil {
+		return false, err
+	}
+
+	return string(gc.Spec.ControllerName) == getGatewayControllerName(), nil
+}

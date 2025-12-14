@@ -42,68 +42,88 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
-	if k8sRoute.DeletionTimestamp.IsZero() {
-		// Add or Update.
-		slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Debug("adding or updating HTTPRoute")
-		// Add a finalizer so we can correctly clean up the route when it's deleted
-		if !containsString(k8sRoute.Finalizers, httpRouteFinalizer) {
-			k8sRoute.Finalizers = append(k8sRoute.Finalizers, httpRouteFinalizer)
-			if err := r.Update(ctx, &k8sRoute); err != nil {
-				slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Error("failed to add finalizer", "error", err)
-				return ctrl.Result{}, err
-			}
-		}
+	// Check if the Gateway is managed by this controller
+	isManaged, err := IsGatewayManaged(ctx, r.Client, routeDetails.gwNamespace, routeDetails.gwName)
+	if err != nil {
+		slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Error("failed to check if gateway is managed",
+			"gateway", fmt.Sprintf("%s/%s", routeDetails.gwNamespace, routeDetails.gwName),
+			"error", err)
+		return ctrl.Result{}, err // Retry
+	}
+	if !isManaged {
+		slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Debug("gateway not managed by this controller, skipping",
+			"gateway", fmt.Sprintf("%s/%s", routeDetails.gwNamespace, routeDetails.gwName))
+		return ctrl.Result{}, nil
+	}
 
-		err := r.GatewayReconciler.SetRoute(
+	if k8sRoute.DeletionTimestamp.IsZero() {
+		return r.handleAddOrUpdate(ctx, req, &k8sRoute, routeDetails)
+	}
+	return r.handleDeletion(ctx, req, &k8sRoute, routeDetails)
+}
+
+func (r *HTTPRouteReconciler) handleAddOrUpdate(ctx context.Context, req ctrl.Request, k8sRoute *gatewayv1.HTTPRoute, routeDetails *routeDetails) (ctrl.Result, error) {
+	// Add or Update.
+	slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Debug("adding or updating HTTPRoute")
+	// Add a finalizer so we can correctly clean up the route when it's deleted
+	if !containsString(k8sRoute.Finalizers, httpRouteFinalizer) {
+		k8sRoute.Finalizers = append(k8sRoute.Finalizers, httpRouteFinalizer)
+		if err := r.Update(ctx, k8sRoute); err != nil {
+			slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Error("failed to add finalizer", "error", err)
+			return ctrl.Result{}, err
+		}
+	}
+
+	err := r.GatewayReconciler.SetRoute(
+		ctx,
+		routeDetails.gwNamespace, routeDetails.gwName,
+		routeDetails.listenerName,
+		routeDetails.routeName, routeDetails.routeNamespace,
+		routeDetails.backendHost, routeDetails.backendPort)
+	if err != nil {
+		var notReadyErr *ErrGatewayNotReady
+		var notFoundErr *ErrGatewayNotFound
+		if errors.As(err, &notReadyErr) || errors.As(err, &notFoundErr) {
+			slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Warn("gateway not ready or not found, will retry with backoff",
+				"gateway", fmt.Sprintf("%s/%s", routeDetails.gwNamespace, routeDetails.gwName),
+				"error", err.Error())
+			// Return error to trigger controller-runtime's exponential backoff
+			return ctrl.Result{}, err
+		}
+		slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Error("failed to set route", "error", err)
+		return ctrl.Result{}, err
+	}
+	slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Debug("route set successfully")
+	return ctrl.Result{RequeueAfter: routeReconcilePeriod}, nil
+}
+
+func (r *HTTPRouteReconciler) handleDeletion(ctx context.Context, req ctrl.Request, k8sRoute *gatewayv1.HTTPRoute, routeDetails *routeDetails) (ctrl.Result, error) {
+	// Handle deletion
+	slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Info("processing HTTPRoute deletion")
+	if containsString(k8sRoute.Finalizers, httpRouteFinalizer) {
+		err := r.GatewayReconciler.RemoveRoute(
 			ctx,
 			routeDetails.gwNamespace, routeDetails.gwName,
 			routeDetails.listenerName,
 			routeDetails.routeName, routeDetails.routeNamespace,
 			routeDetails.backendHost, routeDetails.backendPort)
 		if err != nil {
-			var notReadyErr *ErrGatewayNotReady
-			var notFoundErr *ErrGatewayNotFound
-			if errors.As(err, &notReadyErr) || errors.As(err, &notFoundErr) {
-				slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Warn("gateway not ready or not found, will retry with backoff",
-					"gateway", fmt.Sprintf("%s/%s", routeDetails.gwNamespace, routeDetails.gwName),
-					"error", err.Error())
-				// Return error to trigger controller-runtime's exponential backoff
+			var gwNotFoundErr *ErrGatewayNotFound
+			var routeNotFoundErr *ErrRouteNotFound
+			if !errors.As(err, &gwNotFoundErr) && !errors.As(err, &routeNotFoundErr) {
+				slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Error("failed to remove route", "error", err)
 				return ctrl.Result{}, err
 			}
-			slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Error("failed to set route", "error", err)
+		}
+		// Gateway or route were deleted, no need to requeue
+
+		k8sRoute.Finalizers = removeString(k8sRoute.Finalizers, httpRouteFinalizer)
+		if err := r.Update(ctx, k8sRoute); err != nil {
+			slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Error("failed to remove finalizer", "error", err)
 			return ctrl.Result{}, err
 		}
-		slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Debug("route set successfully")
-	} else {
-		// Handle deletion
-		slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Info("processing HTTPRoute deletion")
-		if containsString(k8sRoute.Finalizers, httpRouteFinalizer) {
-			err := r.GatewayReconciler.RemoveRoute(
-				ctx,
-				routeDetails.gwNamespace, routeDetails.gwName,
-				routeDetails.listenerName,
-				routeDetails.routeName, routeDetails.routeNamespace,
-				routeDetails.backendHost, routeDetails.backendPort)
-			if err != nil {
-				var gwNotFoundErr *ErrGatewayNotFound
-				var routeNotFoundErr *ErrRouteNotFound
-				if !errors.As(err, &gwNotFoundErr) && !errors.As(err, &routeNotFoundErr) {
-					slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Error("failed to remove route", "error", err)
-					return ctrl.Result{}, err
-				}
-			}
-			// Gateway or route were deleted, no need to requeue
-
-			k8sRoute.Finalizers = removeString(k8sRoute.Finalizers, httpRouteFinalizer)
-			if err := r.Update(ctx, &k8sRoute); err != nil {
-				slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Error("failed to remove finalizer", "error", err)
-				return ctrl.Result{}, err
-			}
-			slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Debug("route removed successfully")
-		}
+		slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Debug("route removed successfully")
 	}
-
-	// Periodically reconcile to retry failed route attachments and ensure routes are active
 	return ctrl.Result{RequeueAfter: routeReconcilePeriod}, nil
 }
 
