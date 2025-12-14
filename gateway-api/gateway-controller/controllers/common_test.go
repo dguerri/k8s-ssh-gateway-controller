@@ -238,6 +238,11 @@ func TestGetRemoteAddress(t *testing.T) {
 			input:    "No matching address",
 			expected: []string{},
 		},
+		{
+			name:     "localhost.run HTTPS URI",
+			input:    "7e0933afd6e392.lhr.life tunneled with tls termination, https://7e0933afd6e392.lhr.life\r\n",
+			expected: []string{"https://7e0933afd6e392.lhr.life"},
+		},
 	}
 
 	for _, tt := range tests {

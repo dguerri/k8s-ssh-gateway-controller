@@ -137,14 +137,18 @@ func getSvcHostname(svcName, svcNamespace string) string {
 }
 
 // getRemoteAddress extracts remote addresses from the input string using regex.
-// Pico.sh TCP and HTTP(S) URIs are supported.
+// pico.sh TCP and HTTP(S) URIs are supported.
+// localhost.run HTTPS URIs are supported
 func getRemoteAddress(input string) ([]string, error) {
 	var results []string
 
 	patterns := map[string][]string{
-		"tcp":   {`TCP\x1b\[0m:\s+([\w\.-]+:\d+)\r`},
-		"http":  {`HTTP\x1b\[0m:\s+(http://[\w\.-]+)\r`},
-		"https": {`HTTPS\x1b\[0m:\s+(https://[\w\.-]+)\r`},
+		"tcp":  {`TCP\x1b\[0m:\s+([\w\.-]+:\d+)\r`},
+		"http": {`HTTP\x1b\[0m:\s+(http://[\w\.-]+)\r`},
+		"https": {
+			`HTTPS\x1b\[0m:\s+(https://[\w\.-]+)\r`,
+			`tunneled with tls termination, (https://[\w\.-]+)`,
+		},
 	}
 
 	for scheme, pats := range patterns {

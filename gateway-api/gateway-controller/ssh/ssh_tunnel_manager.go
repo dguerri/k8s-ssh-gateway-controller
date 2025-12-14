@@ -741,7 +741,7 @@ func (m *SSHTunnelManager) connectClient() error {
 }
 
 // captureServerOutput captures the output from the SSH server and processes it using the remoteAddrFunc.
-// It reads from the server's stdout and applies the remoteAddrFunc to extract URIs from the output.
+// It reads from the server's stdout and stderr and applies the remoteAddrFunc to extract URIs from the output.
 // This function runs in a goroutine and will stop when the connection context is done.
 func (m *SSHTunnelManager) captureServerOutput() {
 	session, err := m.createSSHSession()
@@ -760,12 +760,19 @@ func (m *SSHTunnelManager) captureServerOutput() {
 		return
 	}
 
+	stderr, err := session.StderrPipe()
+	if err != nil {
+		slog.With("function", "captureServerOutput").Error("failed to get stderr pipe", "error", err)
+		return
+	}
+
 	if err := session.Shell(); err != nil {
 		slog.With("function", "captureServerOutput").Error("failed to start remote session", "error", err)
 		return
 	}
 
-	go m.readServerOutput(stdout)
+	go m.readServerOutput(stdout, "stdout")
+	go m.readServerOutput(stderr, "stderr")
 
 	<-m.connectionCtx.Done()
 	_ = session.Close() // #nosec G104 -- Cleanup on shutdown, error not actionable
@@ -789,7 +796,7 @@ func (m *SSHTunnelManager) createSSHSession() (*ssh.Session, error) {
 }
 
 // readServerOutput reads and processes output from the SSH server.
-func (m *SSHTunnelManager) readServerOutput(stdout io.Reader) {
+func (m *SSHTunnelManager) readServerOutput(reader io.Reader, streamName string) {
 	buf := make([]byte, 4096)
 	for {
 		select {
@@ -797,28 +804,28 @@ func (m *SSHTunnelManager) readServerOutput(stdout io.Reader) {
 			slog.With("function", "captureServerOutput").Debug("connection context canceled, stopping server output capture")
 			return
 		default:
-			n, err := stdout.Read(buf)
+			n, err := reader.Read(buf)
 			if err != nil {
 				if err != io.EOF {
-					slog.With("function", "captureServerOutput", "stream", "stdout").Error("read error", "error", err)
+					slog.With("function", "captureServerOutput", "stream", streamName).Error("read error", "error", err)
 				}
 				return
 			}
 			if n > 0 {
-				m.processServerData(buf[:n])
+				m.processServerData(buf[:n], streamName)
 			}
 		}
 	}
 }
 
 // processServerData extracts URIs from server output and notifies waiting goroutines.
-func (m *SSHTunnelManager) processServerData(data []byte) {
+func (m *SSHTunnelManager) processServerData(data []byte, streamName string) {
 	dataStr := string(data)
-	slog.With("function", "captureServerOutput", "stream", "stdout").Debug(dataStr)
+	slog.With("function", "captureServerOutput", "stream", streamName).Debug(dataStr)
 
 	uris, err := m.remoteAddrFunc(dataStr)
 	if err != nil {
-		slog.With("function", "captureServerOutput", "stream", "stdout").Error("failed to extract URIs from data", "error", err)
+		slog.With("function", "captureServerOutput", "stream", streamName).Error("failed to extract URIs from data", "error", err)
 		return
 	}
 
@@ -826,9 +833,9 @@ func (m *SSHTunnelManager) processServerData(data []byte) {
 		return
 	}
 
-	slog.With("function", "captureServerOutput", "stream", "stdout").Debug("extracted URIs from server output", "uris_count", len(uris))
+	slog.With("function", "captureServerOutput", "stream", streamName).Debug("extracted URIs from server output", "uris_count", len(uris))
 	for _, uri := range uris {
-		slog.With("function", "captureServerOutput", "stream", "stdout").Info("extracted URI from server output", "uri", uri)
+		slog.With("function", "captureServerOutput", "stream", streamName).Info("extracted URI from server output", "uri", uri)
 	}
 
 	m.notifyURIWaiters(uris)
