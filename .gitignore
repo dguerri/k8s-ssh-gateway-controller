@@ -1,5 +1,6 @@
 shared.yaml
 combined-with-data*.yaml
+combined-localhost-run.yaml
 gateway-api/gateway-controller/gateway-controller
 publish.sh
 deploy.sh
