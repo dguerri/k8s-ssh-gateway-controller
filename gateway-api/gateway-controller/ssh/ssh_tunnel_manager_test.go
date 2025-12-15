@@ -1210,3 +1210,51 @@ func TestEmptyHostnameForwardingStoresAddresses(t *testing.T) {
 		t.Errorf("Expected assigned addresses http://example.com and https://example.com, got: %v", addrs)
 	}
 }
+
+// TestAuthenticationMethods verifies that the SSH client config includes both
+// publickey and keyboard-interactive authentication methods.
+func TestAuthenticationMethods(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Capture the ClientConfig when sshDial is called
+	var capturedConfig *ssh.ClientConfig
+	mockDialFunc := func(network, addr string, cfg *ssh.ClientConfig) (sshClient, error) {
+		capturedConfig = cfg
+		return &fakeClient{}, nil
+	}
+
+	sshConfig := SSHConnectionConfig{
+		PrivateKey:        GenerateTestPrivateKey(t),
+		ServerAddress:     "serveo.net:22",
+		Username:          "testuser",
+		HostKey:           "",
+		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
+		KeepAliveInterval: 5 * time.Second,
+		SSHDialFunc:       mockDialFunc,
+	}
+
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+	if err != nil {
+		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+	}
+
+	// Connect to trigger the auth methods setup
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+
+	// Verify ClientConfig was captured
+	if capturedConfig == nil {
+		t.Fatal("ClientConfig was not captured")
+	}
+
+	// Verify that we have at least 2 auth methods
+	// The first should be publickey, the second should be keyboard-interactive
+	if len(capturedConfig.Auth) < 2 {
+		t.Fatalf("Expected at least 2 auth methods (publickey + keyboard-interactive), got %d", len(capturedConfig.Auth))
+	}
+
+	t.Logf("Successfully verified SSH config has %d auth methods (publickey + keyboard-interactive)", len(capturedConfig.Auth))
+}

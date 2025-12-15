@@ -519,6 +519,15 @@ func (m *SSHTunnelManager) sendForwardingOnce(fwd *ForwardingConfig, req Forward
 		return fmt.Errorf("ssh: unknown forwarding request type: %q", req)
 	}
 
+	slog.With("function", "sendForwardingOnce").Info("sending SSH request",
+		"request_type", reqType,
+		"remote_host", fwd.RemoteHost,
+		"remote_port", fwd.RemotePort,
+		"internal_host", fwd.InternalHost,
+		"internal_port", fwd.InternalPort,
+		"marshaled_addr", forwardMessage.addr,
+		"marshaled_port", forwardMessage.rport)
+
 	resCh := make(chan struct {
 		err error
 		ok  bool
@@ -537,15 +546,21 @@ func (m *SSHTunnelManager) sendForwardingOnce(fwd *ForwardingConfig, req Forward
 
 	select {
 	case <-ctx.Done():
+		slog.With("function", "sendForwardingOnce").Error("request timed out",
+			"request", reqType, "remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
 		return fmt.Errorf("ssh: %s request timed out", reqType)
 	case res := <-resCh:
 		if res.err != nil {
+			slog.With("function", "sendForwardingOnce").Error("request failed with error",
+				"request", reqType, "remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort, "error", res.err)
 			return res.err
 		}
 		if !res.ok {
+			slog.With("function", "sendForwardingOnce").Error("request denied by server",
+				"request", reqType, "remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
 			return fmt.Errorf("ssh: %s request denied by server", reqType)
 		}
-		slog.With("function", "sendForwardingOnce").Debug("request accepted",
+		slog.With("function", "sendForwardingOnce").Info("request accepted by server",
 			"request", reqType, "remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
 		return nil
 	}
@@ -693,8 +708,16 @@ func (m *SSHTunnelManager) handleChannels() {
 // Must be called with a write lock on m.clientMu
 func (m *SSHTunnelManager) connectClient() error {
 	config := &ssh.ClientConfig{
-		User:    m.sshUser,
-		Auth:    []ssh.AuthMethod{ssh.PublicKeys(m.signer)},
+		User: m.sshUser,
+		Auth: []ssh.AuthMethod{
+			ssh.PublicKeys(m.signer),
+			ssh.KeyboardInteractive(func(user, instruction string, questions []string, echos []bool) ([]string, error) {
+				// serveo.net and similar services use keyboard-interactive for authentication
+				// but don't actually require answers to questions
+				answers := make([]string, len(questions))
+				return answers, nil
+			}),
+		},
 		Timeout: m.connTimeout,
 	}
 
