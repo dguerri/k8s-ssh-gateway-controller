@@ -112,7 +112,7 @@ func isRouteAlreadyAttached(l *Listener, routeName, routeNamespace, backendHost 
 
 // isForwardingValid checks if a forwarding exists in SSH manager and matches expectations.
 // For hostname-based forwardings: verifies assigned URIs contain the requested hostname.
-// For wildcard (0.0.0.0): accepts any assigned address.
+// For wildcard (0.0.0.0, localhost, or no address): accepts any assigned address.
 // Returns false if no addresses assigned or hostname mismatch.
 func (r *GatewayReconciler) isForwardingValid(l *Listener) bool {
 	addrs := r.manager.GetAssignedAddresses(l.Hostname, l.Port)
@@ -120,18 +120,18 @@ func (r *GatewayReconciler) isForwardingValid(l *Listener) bool {
 		return false // No forwarding exists in SSH manager
 	}
 
-	// For specific hostnames (not wildcard), verify hostname matches
-	if l.Hostname != "0.0.0.0" {
-		for _, addr := range addrs {
-			if strings.Contains(addr, l.Hostname) {
-				return true // Found matching hostname in URIs
-			}
-		}
-		return false // Hostname mismatch (wrong subdomain assigned)
+	// For wildcard hostnames (0.0.0.0, localhost), accept any assigned address
+	if l.Hostname == "0.0.0.0" || l.Hostname == "localhost" {
+		return true
 	}
 
-	// For wildcard, any address is valid
-	return true
+	// For specific hostnames, verify hostname matches
+	for _, addr := range addrs {
+		if strings.Contains(addr, l.Hostname) {
+			return true // Found matching hostname in URIs
+		}
+	}
+	return false // Hostname mismatch (wrong subdomain assigned)
 }
 
 // setupRouteForwarding handles the actual forwarding setup for a route.

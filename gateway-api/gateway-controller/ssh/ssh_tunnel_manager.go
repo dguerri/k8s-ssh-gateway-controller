@@ -445,12 +445,15 @@ func (m *SSHTunnelManager) sendForwarding(fwd *ForwardingConfig, req ForwardRequ
 		verifyCtx, verifyCancel := context.WithTimeout(m.externalCtx, m.addressVerificationTimeout)
 		defer verifyCancel()
 
-		needsVerification := fwd.RemoteHost != "" && fwd.RemoteHost != "0.0.0.0"
+		needsVerification := fwd.RemoteHost != "" && fwd.RemoteHost != "0.0.0.0" && fwd.RemoteHost != "localhost"
 
 		select {
 		case <-verifyCtx.Done():
 			if needsVerification {
-				// Timeout waiting for address
+				// Timeout waiting for address - cancel the forwarding to avoid orphaned forwardings
+				slog.With("function", "sendForwarding").Error("timeout waiting for address verification, canceling forwarding",
+					"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
+				_ = m.sendForwardingOnce(fwd, ForwardCancel)
 				return fmt.Errorf("timeout waiting for address verification for %s", fwd.RemoteHost)
 			}
 			// For wildcard/generic, we might proceed without specific verification if timeout hits,

@@ -182,7 +182,7 @@ func TestCreateListener(t *testing.T) {
 		}
 
 		result := createListener(listener)
-		assert.Equal(t, "0.0.0.0", result.Hostname)
+		assert.Equal(t, "localhost", result.Hostname)
 		assert.Equal(t, "TCP", result.Protocol)
 		assert.Equal(t, 1234, result.Port)
 	})

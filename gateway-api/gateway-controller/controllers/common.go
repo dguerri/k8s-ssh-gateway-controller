@@ -101,7 +101,7 @@ func getGwKey(gwNamespace, gwName string) string {
 }
 
 func createListener(k8sListener gatewayv1.Listener) *Listener {
-	remoteHostname := "0.0.0.0"
+	remoteHostname := "localhost"
 	if k8sListener.Hostname != nil {
 		remoteHostname = string(*k8sListener.Hostname)
 	}
@@ -139,15 +139,23 @@ func getSvcHostname(svcName, svcNamespace string) string {
 // getRemoteAddress extracts remote addresses from the input string using regex.
 // pico.sh TCP and HTTP(S) URIs are supported.
 // localhost.run HTTPS URIs are supported
+// serveo.net TCP and HTTP(S) URIs are supported
 func getRemoteAddress(input string) ([]string, error) {
 	var results []string
 
 	patterns := map[string][]string{
-		"tcp":  {`TCP\x1b\[0m:\s+([\w\.-]+:\d+)\r`},
-		"http": {`HTTP\x1b\[0m:\s+(http://[\w\.-]+)\r`},
+		"tcp": {
+			`TCP\x1b\[0m:\s+([\w\.-]+:\d+)\r`,
+			`Forwarding TCP traffic from ([\w\.-]+:\d+)`,
+		},
+		"http": {
+			`HTTP\x1b\[0m:\s+(http://[\w\.-]+)\r`,
+			`Forwarding HTTP traffic from (http://[\w\.-]+)`,
+		},
 		"https": {
 			`HTTPS\x1b\[0m:\s+(https://[\w\.-]+)\r`,
 			`tunneled with tls termination, (https://[\w\.-]+)`,
+			`Forwarding HTTP traffic from (https://[\w\.-]+)`,
 		},
 	}
 
