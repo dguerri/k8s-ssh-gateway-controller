@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 
@@ -14,6 +15,28 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 )
+
+// errorReturningClient is a mock client that can return specific errors for Get operations
+type errorReturningClient struct {
+	client.Client
+	gatewayError      error
+	gatewayClassError error
+}
+
+// Get wraps the underlying client's Get method and returns configured errors for specific resource types
+func (e *errorReturningClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	switch obj.(type) {
+	case *gatewayv1.Gateway:
+		if e.gatewayError != nil {
+			return e.gatewayError
+		}
+	case *gatewayv1.GatewayClass:
+		if e.gatewayClassError != nil {
+			return e.gatewayClassError
+		}
+	}
+	return e.Client.Get(ctx, key, obj, opts...)
+}
 
 func TestIsGatewayManaged(t *testing.T) {
 	// Register schemes
@@ -74,7 +97,7 @@ func TestIsGatewayManaged(t *testing.T) {
 		},
 	}
 
-	client := fake.NewClientBuilder().
+	baseClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(gwClassManaged, gwClassUnmanaged, gwManaged, gwUnmanaged, gwMissingClass).
 		Build()
@@ -82,45 +105,81 @@ func TestIsGatewayManaged(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name          string
-		gwName        string
-		gwNamespace   string
-		expected      bool
-		expectedError bool
+		name           string
+		gwName         string
+		gwNamespace    string
+		clientModifier func(client.Client) client.Client
+		expected       bool
+		expectedError  bool
 	}{
 		{
-			name:          "managed gateway",
-			gwName:        "managed-gateway",
-			gwNamespace:   "default",
-			expected:      true,
-			expectedError: false,
+			name:           "managed gateway",
+			gwName:         "managed-gateway",
+			gwNamespace:    "default",
+			clientModifier: nil,
+			expected:       true,
+			expectedError:  false,
 		},
 		{
-			name:          "unmanaged gateway",
-			gwName:        "unmanaged-gateway",
-			gwNamespace:   "default",
-			expected:      false,
-			expectedError: false,
+			name:           "unmanaged gateway",
+			gwName:         "unmanaged-gateway",
+			gwNamespace:    "default",
+			clientModifier: nil,
+			expected:       false,
+			expectedError:  false,
 		},
 		{
-			name:          "gateway with missing class",
-			gwName:        "missing-class-gateway",
-			gwNamespace:   "default",
-			expected:      false,
-			expectedError: true, // Should error because class is missing
+			name:           "gateway with missing class",
+			gwName:         "missing-class-gateway",
+			gwNamespace:    "default",
+			clientModifier: nil,
+			expected:       false,
+			expectedError:  false, // No error - just not managed
 		},
 		{
-			name:          "missing gateway",
-			gwName:        "non-existent-gateway",
-			gwNamespace:   "default",
+			name:           "missing gateway",
+			gwName:         "non-existent-gateway",
+			gwNamespace:    "default",
+			clientModifier: nil,
+			expected:       false,
+			expectedError:  false, // No error - just not managed
+		},
+		{
+			name:        "API error when fetching gateway",
+			gwName:      "managed-gateway",
+			gwNamespace: "default",
+			clientModifier: func(c client.Client) client.Client {
+				return &errorReturningClient{
+					Client:       c,
+					gatewayError: fmt.Errorf("simulated API error: permission denied"),
+				}
+			},
 			expected:      false,
-			expectedError: true, // Should error because gateway is missing
+			expectedError: true, // Should return error
+		},
+		{
+			name:        "API error when fetching gateway class",
+			gwName:      "managed-gateway",
+			gwNamespace: "default",
+			clientModifier: func(c client.Client) client.Client {
+				return &errorReturningClient{
+					Client:            c,
+					gatewayClassError: fmt.Errorf("simulated API error: network timeout"),
+				}
+			},
+			expected:      false,
+			expectedError: true, // Should return error
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			isManaged, err := IsGatewayManaged(ctx, client, tt.gwNamespace, tt.gwName)
+			var testClient client.Client = baseClient
+			if tt.clientModifier != nil {
+				testClient = tt.clientModifier(baseClient)
+			}
+
+			isManaged, err := IsGatewayManaged(ctx, testClient, tt.gwNamespace, tt.gwName)
 
 			if tt.expectedError {
 				assert.Error(t, err)
