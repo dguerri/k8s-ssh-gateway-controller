@@ -1,5 +1,5 @@
 # Build Stage
-FROM golang:1.24 AS builder
+FROM golang:1.25 AS builder
 
 # Set necessary environment variables
 ENV CGO_ENABLED=0 \
