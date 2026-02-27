@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	sshmgr "github.com/dguerri/ssh-gateway-api-controller/ssh"
@@ -94,6 +95,25 @@ func getEnvDurationOrDefault(key string, defaultValue time.Duration) time.Durati
 		return defaultValue
 	}
 	return parsed
+}
+
+// controllerNameSuffix returns the controller name with '/' replaced by '-',
+// so it can be safely embedded in a Kubernetes finalizer name (which only allows
+// one '/' as a prefix separator: "<dns-prefix>/<name>").
+func controllerNameSuffix() string {
+	return strings.ReplaceAll(getGatewayControllerName(), "/", "-")
+}
+
+func getHTTPRouteFinalizer() string {
+	return "httproute.gateway.networking.k8s.io/finalizer-" + controllerNameSuffix()
+}
+
+func getTCPRouteFinalizer() string {
+	return "tcproute.gateway.networking.k8s.io/finalizer-" + controllerNameSuffix()
+}
+
+func getGatewayFinalizer() string {
+	return "gateway.networking.k8s.io/finalizer-" + controllerNameSuffix()
 }
 
 func getGwKey(gwNamespace, gwName string) string {

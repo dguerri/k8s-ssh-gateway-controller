@@ -254,6 +254,51 @@ func TestGetRemoteAddress(t *testing.T) {
 	}
 }
 
+func TestGetHTTPRouteFinalizer(t *testing.T) {
+	t.Run("default controller name", func(t *testing.T) {
+		os.Unsetenv("GATEWAY_CONTROLLER_NAME")
+		result := getHTTPRouteFinalizer()
+		assert.Equal(t, "httproute.gateway.networking.k8s.io/finalizer-tunnels.ssh.gateway-api-controller", result)
+	})
+
+	t.Run("custom controller name", func(t *testing.T) {
+		os.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/my-controller")
+		defer os.Unsetenv("GATEWAY_CONTROLLER_NAME")
+		result := getHTTPRouteFinalizer()
+		assert.Equal(t, "httproute.gateway.networking.k8s.io/finalizer-example.com-my-controller", result)
+	})
+}
+
+func TestGetTCPRouteFinalizer(t *testing.T) {
+	t.Run("default controller name", func(t *testing.T) {
+		os.Unsetenv("GATEWAY_CONTROLLER_NAME")
+		result := getTCPRouteFinalizer()
+		assert.Equal(t, "tcproute.gateway.networking.k8s.io/finalizer-tunnels.ssh.gateway-api-controller", result)
+	})
+
+	t.Run("custom controller name", func(t *testing.T) {
+		os.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/my-controller")
+		defer os.Unsetenv("GATEWAY_CONTROLLER_NAME")
+		result := getTCPRouteFinalizer()
+		assert.Equal(t, "tcproute.gateway.networking.k8s.io/finalizer-example.com-my-controller", result)
+	})
+}
+
+func TestGetGatewayFinalizer(t *testing.T) {
+	t.Run("default controller name", func(t *testing.T) {
+		os.Unsetenv("GATEWAY_CONTROLLER_NAME")
+		result := getGatewayFinalizer()
+		assert.Equal(t, "gateway.networking.k8s.io/finalizer-tunnels.ssh.gateway-api-controller", result)
+	})
+
+	t.Run("custom controller name", func(t *testing.T) {
+		os.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/my-controller")
+		defer os.Unsetenv("GATEWAY_CONTROLLER_NAME")
+		result := getGatewayFinalizer()
+		assert.Equal(t, "gateway.networking.k8s.io/finalizer-example.com-my-controller", result)
+	})
+}
+
 func TestExtractHostnameFromURI(t *testing.T) {
 	tests := []struct {
 		name     string

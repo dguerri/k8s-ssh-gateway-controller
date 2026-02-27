@@ -22,8 +22,6 @@ import (
 	sshmgr "github.com/dguerri/ssh-gateway-api-controller/ssh"
 )
 
-const gatewayFinalizer = "gateway.networking.k8s.io/finalizer"
-
 // Get the controller name from environment variable or use a default
 func getGatewayControllerName() string {
 	if controllerName := os.Getenv("GATEWAY_CONTROLLER_NAME"); controllerName != "" {
@@ -400,45 +398,52 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	var gc gatewayv1.GatewayClass
-	if err := r.Get(ctx, client.ObjectKey{Name: string(k8sGw.Spec.GatewayClassName)}, &gc); err != nil {
-		return ctrl.Result{}, err
-	}
+	isManagedByUs := containsString(k8sGw.Finalizers, getGatewayFinalizer())
 
-	controllerName := getGatewayControllerName()
-	if string(gc.Spec.ControllerName) != controllerName {
-		slog.With("function", "Reconcile").Debug("skipping Gateway: does not match controllerName", "gatewayClassName", k8sGw.Spec.GatewayClassName)
-		return ctrl.Result{}, nil
-	}
-
-	if k8sGw.DeletionTimestamp.IsZero() {
-		// Handle add or Update
-		slog.With("function", "Reconcile", "gateway", req.NamespacedName).Debug("adding or updating gateway")
-		// Add a finalizer so we can correctly clean up the route when it's deleted
-		if !containsString(k8sGw.Finalizers, gatewayFinalizer) {
-			k8sGw.Finalizers = append(k8sGw.Finalizers, gatewayFinalizer)
-			if err := r.Update(ctx, &k8sGw); err != nil {
-				slog.With("function", "Reconcile").Error("failed to add finalizer", "gateway", key, "error", err)
-				return ctrl.Result{}, err
-			}
-		}
-		if err := r.handleAddOrUpdateGateway(ctx, &k8sGw); err != nil {
-			return ctrl.Result{}, err
-		}
-		if err := r.updateGatewayStatusIfChanged(ctx, &k8sGw, key); err != nil {
-			return ctrl.Result{}, err
-		}
-	} else {
-		// Handle deletion
-		slog.With("function", "Reconcile", "gateway", req.NamespacedName).Info("processing gateway deletion")
-		if containsString(k8sGw.Finalizers, gatewayFinalizer) {
+	if !k8sGw.DeletionTimestamp.IsZero() {
+		if isManagedByUs {
+			// Handle deletion
+			slog.With("function", "Reconcile", "gateway", req.NamespacedName).Info("processing gateway deletion")
 			r.handleDeleteGateway(ctx, &k8sGw)
-			k8sGw.Finalizers = removeString(k8sGw.Finalizers, gatewayFinalizer)
+			k8sGw.Finalizers = removeString(k8sGw.Finalizers, getGatewayFinalizer())
 			if err := r.Update(ctx, &k8sGw); err != nil {
 				slog.With("function", "Reconcile").Error("failed to remove finalizer", "gateway", key, "error", err)
 				return ctrl.Result{}, err
 			}
+		} else {
+			slog.With("function", "Reconcile", "gateway", req.NamespacedName).Debug("gateway being deleted but not managed by us, skipping")
 		}
+		return ctrl.Result{}, nil
+	}
+
+	// Not deleting — if we don't yet own it, check GatewayClass to decide adoption
+	if !isManagedByUs {
+		var gc gatewayv1.GatewayClass
+		if err := r.Get(ctx, client.ObjectKey{Name: string(k8sGw.Spec.GatewayClassName)}, &gc); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		controllerName := getGatewayControllerName()
+		if string(gc.Spec.ControllerName) != controllerName {
+			slog.With("function", "Reconcile").Debug("skipping Gateway: does not match controllerName", "gatewayClassName", k8sGw.Spec.GatewayClassName)
+			return ctrl.Result{}, nil
+		}
+	}
+
+	// Handle add or update
+	slog.With("function", "Reconcile", "gateway", req.NamespacedName).Debug("adding or updating gateway")
+	if !containsString(k8sGw.Finalizers, getGatewayFinalizer()) {
+		k8sGw.Finalizers = append(k8sGw.Finalizers, getGatewayFinalizer())
+		if err := r.Update(ctx, &k8sGw); err != nil {
+			slog.With("function", "Reconcile").Error("failed to add finalizer", "gateway", key, "error", err)
+			return ctrl.Result{}, err
+		}
+	}
+	if err := r.handleAddOrUpdateGateway(ctx, &k8sGw); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.updateGatewayStatusIfChanged(ctx, &k8sGw, key); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Periodically requeue to check SSH connection health and update status
