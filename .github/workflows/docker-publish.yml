@@ -7,13 +7,13 @@ name: Docker
 
 on:
   schedule:
-    - cron: '22 0 * * *'
+    - cron: "22 0 * * *"
   push:
-    branches: [ "main" ]
+    branches: ["main"]
     # Publish semver tags as releases.
-    tags: [ 'v*.*.*' ]
+    tags: ["v*.*.*"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 env:
   # Use docker.io for Docker Hub if empty
@@ -21,13 +21,11 @@ env:
   # github.repository as <account>/<repo>
   IMAGE_NAME: ${{ github.repository }}
 
-
 jobs:
   build:
-
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
       security-events: write
       # This is used to complete the identity challenge
@@ -44,7 +42,7 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: sigstore/cosign-installer@59acb6260d9c0ba8f4a2f9d9b48431a222b68e20 #v3.5.0
         with:
-          cosign-release: 'v2.2.4'
+          cosign-release: "v2.2.4"
 
       # Set up BuildKit Docker container builder to be able to build
       # multi-platform images and export cache
@@ -140,13 +138,12 @@ jobs:
         run: |
           # Define the target image using the digest for precision
           IMAGE_REF="ghcr.io/${{ github.repository }}@${{ steps.build-and-push.outputs.digest }}"
-          
+
           # Login to GHCR for ORAS
           echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u ${{ github.actor }} --password-stdin
-          
+
           # Attach the file as an OCI 1.1 Referrer
           oras attach --distribution-spec v1.1-referrers-api \
             --artifact-type application/spdx+json \
             "$IMAGE_REF" \
             "./${{ github.event.repository.name }}-sbom.spdx.json"
-            
