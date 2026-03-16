@@ -96,6 +96,7 @@ type SSHTunnelManager struct {
 	addressVerificationTimeout time.Duration
 	clientMu                   sync.RWMutex
 	addrNotifMu                sync.RWMutex
+	captureReady               chan struct{}
 	proxyProtocol              int
 	connected                  bool
 }
@@ -442,6 +443,20 @@ func matchesRequestedHost(uris []string, requestedHost string, requestedPort int
 // It returns an error if the request fails or is denied by the server.
 // Must be called with a lock on m.clientMu
 func (m *SSHTunnelManager) sendForwarding(fwd *ForwardingConfig, req ForwardRequest) error {
+	// Wait for the capture session (Shell) to be ready before sending the
+	// tcpip-forward request. This ensures the server output (forwarding
+	// addresses) will be captured. Without this, the server may output
+	// addresses before the Shell session is listening, and they'd be lost.
+	if req == ForwardStart && m.captureReady != nil {
+		slog.With("function", "sendForwarding").Debug("waiting for capture session to be ready")
+		select {
+		case <-m.captureReady:
+			slog.With("function", "sendForwarding").Debug("capture session ready, proceeding")
+		case <-m.connectionCtx.Done():
+			return fmt.Errorf("connection closed while waiting for capture session")
+		}
+	}
+
 	// Send the request once
 	err := m.sendForwardingOnce(fwd, req)
 	if err != nil {
@@ -785,8 +800,13 @@ func (m *SSHTunnelManager) connectClient() error {
 	m.connected = true
 	m.connectionCtx, m.connectionCancel = context.WithCancel(m.externalCtx)
 
+	// captureReady is closed when the capture session (Shell) is ready to receive
+	// server output. Forwardings wait on this before sending tcpip-forward requests,
+	// ensuring the Shell session is listening when the server outputs addresses.
+	m.captureReady = make(chan struct{})
 	if m.remoteAddrFunc == nil {
 		slog.With("function", "connect").Debug("remoteAddrFunc is not set, skipping server output capture")
+		close(m.captureReady)
 	} else {
 		slog.With("function", "connect").Debug("remoteAddrFunc is set, capturing server output")
 		go m.captureServerOutput()
@@ -799,13 +819,22 @@ func (m *SSHTunnelManager) connectClient() error {
 // It reads from the server's stdout and stderr and applies the remoteAddrFunc to extract URIs from the output.
 // This function runs in a goroutine and will stop when the connection context is done.
 func (m *SSHTunnelManager) captureServerOutput() {
+	// Ensure captureReady is always closed so forwardings don't block forever,
+	// even if session setup fails.
+	captureSignaled := false
+	defer func() {
+		if !captureSignaled {
+			close(m.captureReady)
+		}
+	}()
+
 	session, err := m.createSSHSession()
 	if err != nil {
 		return
 	}
 	defer func() {
 		if err := session.Close(); err != nil {
-			slog.With("function", "handleConnection").Error("failed to close session", "error", err)
+			slog.With("function", "captureServerOutput").Error("failed to close session", "error", err)
 		}
 	}()
 
@@ -821,11 +850,24 @@ func (m *SSHTunnelManager) captureServerOutput() {
 		return
 	}
 
+	// Start readers and signal readiness BEFORE Start/Shell so that
+	// tcpip-forward requests can proceed concurrently. The readers will
+	// block on Read() until the session produces output.
+	go m.readServerOutput(stdout, "stdout")
+	go m.readServerOutput(stderr, "stderr")
+
+	close(m.captureReady)
+	captureSignaled = true
+	slog.With("function", "captureServerOutput").Debug("capture session ready")
+
 	if m.proxyProtocol > 0 {
+		// Send proxy-protocol as an exec command on this same session.
+		// Equivalent to `ssh server proxy-protocol=N`. The server outputs
+		// forwarding addresses on this session's stdout/stderr.
 		cmd := fmt.Sprintf("proxy-protocol=%d", m.proxyProtocol)
 		slog.With("function", "captureServerOutput").Info("starting session with proxy protocol", "command", cmd)
 		if err := session.Start(cmd); err != nil {
-			slog.With("function", "captureServerOutput").Error("failed to start remote session with proxy protocol", "error", err)
+			slog.With("function", "captureServerOutput").Error("failed to start proxy protocol session", "error", err)
 			return
 		}
 	} else {
@@ -834,9 +876,6 @@ func (m *SSHTunnelManager) captureServerOutput() {
 			return
 		}
 	}
-
-	go m.readServerOutput(stdout, "stdout")
-	go m.readServerOutput(stderr, "stderr")
 
 	<-m.connectionCtx.Done()
 	_ = session.Close() // #nosec G104 -- Cleanup on shutdown, error not actionable

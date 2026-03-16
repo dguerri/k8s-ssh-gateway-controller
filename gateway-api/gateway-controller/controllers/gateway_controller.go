@@ -434,7 +434,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// Apply proxy protocol setting from GatewayClass annotation
 	proxyProtocol := parseProxyProtocol(gc.Annotations)
 	if proxyProtocol > 0 {
-		slog.With("function", "Reconcile").Info("proxy protocol enabled from GatewayClass",
+		slog.With("function", "Reconcile").Debug("proxy protocol enabled from GatewayClass",
 			"gatewayClass", gc.Name, "version", proxyProtocol)
 	}
 	r.manager.SetProxyProtocol(proxyProtocol)
