@@ -103,8 +103,7 @@ func TestRemoveString(t *testing.T) {
 
 func TestGetEnvOrDefault(t *testing.T) {
 	t.Run("Environment variable exists", func(t *testing.T) {
-		os.Setenv("TEST_ENV_VAR", "test value")
-		defer os.Unsetenv("TEST_ENV_VAR")
+		t.Setenv("TEST_ENV_VAR", "test value")
 
 		result := getEnvOrDefault("TEST_ENV_VAR", "default value")
 		assert.Equal(t, "test value", result)
@@ -116,8 +115,7 @@ func TestGetEnvOrDefault(t *testing.T) {
 	})
 
 	t.Run("Environment variable is empty string", func(t *testing.T) {
-		os.Setenv("TEST_ENV_VAR", "")
-		defer os.Unsetenv("TEST_ENV_VAR")
+		t.Setenv("TEST_ENV_VAR", "")
 
 		result := getEnvOrDefault("TEST_ENV_VAR", "default value")
 		assert.Equal(t, "", result)
@@ -126,24 +124,21 @@ func TestGetEnvOrDefault(t *testing.T) {
 
 func TestGetEnvDurationOrDefault(t *testing.T) {
 	t.Run("Environment variable exists with valid duration", func(t *testing.T) {
-		os.Setenv("TEST_DURATION_VAR", "10s")
-		defer os.Unsetenv("TEST_DURATION_VAR")
+		t.Setenv("TEST_DURATION_VAR", "10s")
 
 		result := getEnvDurationOrDefault("TEST_DURATION_VAR", 5*time.Second)
 		assert.Equal(t, 10*time.Second, result)
 	})
 
 	t.Run("Environment variable exists with complex duration", func(t *testing.T) {
-		os.Setenv("TEST_DURATION_VAR", "1h30m")
-		defer os.Unsetenv("TEST_DURATION_VAR")
+		t.Setenv("TEST_DURATION_VAR", "1h30m")
 
 		result := getEnvDurationOrDefault("TEST_DURATION_VAR", 5*time.Second)
 		assert.Equal(t, 90*time.Minute, result)
 	})
 
 	t.Run("Environment variable exists with invalid duration", func(t *testing.T) {
-		os.Setenv("TEST_DURATION_VAR", "not a duration")
-		defer os.Unsetenv("TEST_DURATION_VAR")
+		t.Setenv("TEST_DURATION_VAR", "not a duration")
 
 		result := getEnvDurationOrDefault("TEST_DURATION_VAR", 5*time.Second)
 		assert.Equal(t, 5*time.Second, result)
@@ -256,14 +251,12 @@ func TestGetRemoteAddress(t *testing.T) {
 
 func TestGetHTTPRouteFinalizer(t *testing.T) {
 	t.Run("default controller name", func(t *testing.T) {
-		os.Unsetenv("GATEWAY_CONTROLLER_NAME")
 		result := getHTTPRouteFinalizer()
 		assert.Equal(t, "httproute.gateway.networking.k8s.io/finalizer-tunnels.ssh.gateway-api-controller", result)
 	})
 
 	t.Run("custom controller name", func(t *testing.T) {
-		os.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/my-controller")
-		defer os.Unsetenv("GATEWAY_CONTROLLER_NAME")
+		t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/my-controller")
 		result := getHTTPRouteFinalizer()
 		assert.Equal(t, "httproute.gateway.networking.k8s.io/finalizer-example.com-my-controller", result)
 	})
@@ -271,14 +264,12 @@ func TestGetHTTPRouteFinalizer(t *testing.T) {
 
 func TestGetTCPRouteFinalizer(t *testing.T) {
 	t.Run("default controller name", func(t *testing.T) {
-		os.Unsetenv("GATEWAY_CONTROLLER_NAME")
 		result := getTCPRouteFinalizer()
 		assert.Equal(t, "tcproute.gateway.networking.k8s.io/finalizer-tunnels.ssh.gateway-api-controller", result)
 	})
 
 	t.Run("custom controller name", func(t *testing.T) {
-		os.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/my-controller")
-		defer os.Unsetenv("GATEWAY_CONTROLLER_NAME")
+		t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/my-controller")
 		result := getTCPRouteFinalizer()
 		assert.Equal(t, "tcproute.gateway.networking.k8s.io/finalizer-example.com-my-controller", result)
 	})
@@ -286,14 +277,12 @@ func TestGetTCPRouteFinalizer(t *testing.T) {
 
 func TestGetGatewayFinalizer(t *testing.T) {
 	t.Run("default controller name", func(t *testing.T) {
-		os.Unsetenv("GATEWAY_CONTROLLER_NAME")
 		result := getGatewayFinalizer()
 		assert.Equal(t, "gateway.networking.k8s.io/finalizer-tunnels.ssh.gateway-api-controller", result)
 	})
 
 	t.Run("custom controller name", func(t *testing.T) {
-		os.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/my-controller")
-		defer os.Unsetenv("GATEWAY_CONTROLLER_NAME")
+		t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/my-controller")
 		result := getGatewayFinalizer()
 		assert.Equal(t, "gateway.networking.k8s.io/finalizer-example.com-my-controller", result)
 	})

@@ -1,3 +1,5 @@
+version: "2"
+
 # golangci-lint configuration for k8s-ssh-gateway-controller
 # See: https://golangci-lint.run/usage/configuration/
 
@@ -6,18 +8,21 @@ run:
   tests: true
   modules-download-mode: readonly
 
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
 linters:
   enable:
-    # Enabled by default
-    - gosimple      # Simplify code
+    # Enabled by default in v2
     - govet         # Vet examines Go source code
     - ineffassign   # Detect ineffectual assignments
-    - staticcheck   # Advanced Go linter
+    - staticcheck   # Advanced Go linter (includes gosimple)
     - unused        # Check for unused code
+    - errcheck      # Check for unchecked errors
 
     # Additional recommended linters
-    - gofmt         # Check code formatting
-    - goimports     # Check import formatting
     - misspell      # Find commonly misspelled words
     - gocyclo       # Cyclomatic complexity
     - unparam       # Unused function parameters
@@ -26,7 +31,6 @@ linters:
     - nilerr        # Check for returning nil even with non-nil error
     - errorlint     # Error wrapping best practices
     - gosec         # Security issues
-    - errcheck      # Check for unchecked errors
 
   disable:
     - godox         # Too noisy for TODO/FIXME comments
@@ -90,12 +94,11 @@ linters-settings:
     comparison: true
 
 issues:
-  exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
 
   exclude-rules:
-    # Exclude some linters from running on tests files
+    # Exclude some linters from running on test files
     - path: _test\.go
       linters:
         - gocyclo
@@ -104,10 +107,10 @@ issues:
         - unparam
         - contextcheck
 
-    # Exclude some staticcheck messages
-    - linters:
-        - staticcheck
-      text: "SA1019:"
+    # Exclude some linters from running on test fakes/helpers
+    - path: fakes\.go
+      linters:
+        - errcheck
 
     # Exclude error checks in main.go where we exit anyway
     - path: main\.go
@@ -125,4 +128,4 @@ issues:
 
 output:
   formats:
-    - format: colored-line-number
+    colored-line-number: {}

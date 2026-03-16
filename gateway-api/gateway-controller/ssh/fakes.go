@@ -186,9 +186,9 @@ func (l *fakeListener) Accept() (net.Conn, error) {
 		clientConn, serverConn := net.Pipe()
 		l.firstConn = clientConn
 		go func() {
-			defer clientConn.Close()               // #nosec G104 -- Test fake, cleanup on best effort basis
-			defer serverConn.Close()               // #nosec G104 -- Test fake, cleanup on best effort basis
-			_, _ = io.Copy(serverConn, clientConn) // #nosec G104 -- Test fake, errors don't matter
+			defer func() { _ = clientConn.Close() }()
+			defer func() { _ = serverConn.Close() }()
+			_, _ = io.Copy(serverConn, clientConn)
 		}()
 	})
 	if l.firstConn != nil {

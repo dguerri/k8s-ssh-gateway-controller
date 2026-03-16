@@ -229,7 +229,7 @@ func (r *GatewayReconciler) SetRoute(ctx context.Context, gwNamespace, gwName, l
 	gw := r.gateways[gwKey]
 	if gw == nil {
 		// List available gateway names for debugging
-		var availableGWs []string
+		availableGWs := make([]string, 0, len(r.gateways))
 		for k := range r.gateways {
 			availableGWs = append(availableGWs, k)
 		}

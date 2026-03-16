@@ -318,7 +318,9 @@ func TestCloseStopsForwardings(t *testing.T) {
 		InternalPort: 8081,
 	}
 
-	manager.StartForwarding(fwd)
+	if err := manager.StartForwarding(fwd); err != nil {
+		t.Fatalf("Failed to start forwarding: %v", err)
+	}
 
 	manager.Stop()
 
@@ -365,7 +367,9 @@ func TestGetAssignedAddresses(t *testing.T) {
 		InternalHost: "localhost",
 		InternalPort: 8080,
 	}
-	manager.StartForwarding(fwd)
+	if err := manager.StartForwarding(fwd); err != nil {
+		t.Fatalf("Failed to start forwarding: %v", err)
+	}
 
 	// Manually populate assigned addresses
 	key := forwardingKey(fwd.RemoteHost, fwd.RemotePort)

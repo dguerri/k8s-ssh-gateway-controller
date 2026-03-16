@@ -3,7 +3,6 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -42,12 +41,11 @@ func TestIsGatewayManaged(t *testing.T) {
 	// Register schemes
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
-	_ = gatewayv1.AddToScheme(scheme)
-	_ = gatewayv1alpha2.AddToScheme(scheme)
+	_ = gatewayv1.Install(scheme)
+	_ = gatewayv1alpha2.Install(scheme)
 
 	// Set environment variable for controller name
-	os.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
-	defer os.Unsetenv("GATEWAY_CONTROLLER_NAME")
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
 
 	gwClassManaged := &gatewayv1.GatewayClass{
 		ObjectMeta: metav1.ObjectMeta{
@@ -215,11 +213,10 @@ func TestHTTPRouteReconcile_ManagedCheck(t *testing.T) {
 	// Register schemes
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
-	_ = gatewayv1.AddToScheme(scheme)
+	_ = gatewayv1.Install(scheme)
 
 	// Set environment variable
-	os.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
-	defer os.Unsetenv("GATEWAY_CONTROLLER_NAME")
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
 
 	// Create managed resources
 	gwClassManaged := &gatewayv1.GatewayClass{
