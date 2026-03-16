@@ -3,14 +3,20 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	sshmgr "github.com/dguerri/ssh-gateway-api-controller/ssh"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
+
+// Annotation key for enabling PROXY protocol on the SSH session.
+// Valid values: "1" (PROXY protocol v1) or "2" (PROXY protocol v2).
+const annotationProxyProtocol = "ssh-gateway.io/proxy-protocol"
 
 // Defaults for SSH connection, can be overridden by environment variables
 const defaultKeyPath = "/ssh/id"
@@ -154,6 +160,23 @@ func createSSHManager(ctx context.Context) (*sshmgr.SSHTunnelManager, error) {
 
 func getSvcHostname(svcName, svcNamespace string) string {
 	return fmt.Sprintf("%s.%s.svc.cluster.local", svcName, svcNamespace)
+}
+
+// parseProxyProtocol parses the proxy-protocol annotation value.
+// Returns 0 (disabled) for empty/absent, 1 or 2 for valid versions.
+// Logs a warning and returns 0 for invalid values.
+func parseProxyProtocol(annotations map[string]string) int {
+	val, ok := annotations[annotationProxyProtocol]
+	if !ok || val == "" {
+		return 0
+	}
+	version, err := strconv.Atoi(val)
+	if err != nil || (version != 1 && version != 2) {
+		slog.With("function", "parseProxyProtocol").Warn("invalid proxy-protocol annotation value, ignoring",
+			"value", val, "valid_values", "1, 2")
+		return 0
+	}
+	return version
 }
 
 // getRemoteAddress extracts remote addresses from the input string using regex.

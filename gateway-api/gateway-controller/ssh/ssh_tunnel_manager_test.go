@@ -1211,6 +1211,115 @@ func TestEmptyHostnameForwardingStoresAddresses(t *testing.T) {
 	}
 }
 
+// TestSetProxyProtocol tests the SetProxyProtocol method.
+func TestSetProxyProtocol(t *testing.T) {
+	t.Run("sets proxy protocol version", func(t *testing.T) {
+		SetupTest(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		sshConfig := SSHConnectionConfig{
+			PrivateKey:        GenerateTestPrivateKey(t),
+			ServerAddress:     "example.com:22",
+			Username:          "testuser",
+			ConnectTimeout:    5 * time.Second,
+			FwdReqTimeout:     2 * time.Second,
+			KeepAliveInterval: 5 * time.Second,
+		}
+
+		manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+		if err != nil {
+			t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+		}
+
+		if manager.GetProxyProtocol() != 0 {
+			t.Error("Expected initial proxy protocol to be 0")
+		}
+
+		manager.SetProxyProtocol(1)
+		if manager.GetProxyProtocol() != 1 {
+			t.Errorf("Expected proxy protocol 1, got %d", manager.GetProxyProtocol())
+		}
+
+		manager.SetProxyProtocol(2)
+		if manager.GetProxyProtocol() != 2 {
+			t.Errorf("Expected proxy protocol 2, got %d", manager.GetProxyProtocol())
+		}
+	})
+
+	t.Run("same value is no-op", func(t *testing.T) {
+		SetupTest(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		sshConfig := SSHConnectionConfig{
+			PrivateKey:        GenerateTestPrivateKey(t),
+			ServerAddress:     "example.com:22",
+			Username:          "testuser",
+			ConnectTimeout:    5 * time.Second,
+			FwdReqTimeout:     2 * time.Second,
+			KeepAliveInterval: 5 * time.Second,
+		}
+
+		manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+		if err != nil {
+			t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+		}
+
+		if err := manager.Connect(); err != nil {
+			t.Fatalf("Failed to connect: %v", err)
+		}
+
+		// Setting same value (0) should not disconnect
+		manager.SetProxyProtocol(0)
+		if !manager.IsConnected() {
+			t.Error("Expected to remain connected when setting same proxy protocol value")
+		}
+	})
+
+	t.Run("changing value disconnects", func(t *testing.T) {
+		SetupTest(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		sshConfig := SSHConnectionConfig{
+			PrivateKey:        GenerateTestPrivateKey(t),
+			ServerAddress:     "example.com:22",
+			Username:          "testuser",
+			ConnectTimeout:    5 * time.Second,
+			FwdReqTimeout:     2 * time.Second,
+			KeepAliveInterval: 5 * time.Second,
+		}
+
+		manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+		if err != nil {
+			t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+		}
+
+		if err := manager.Connect(); err != nil {
+			t.Fatalf("Failed to connect: %v", err)
+		}
+
+		if !manager.IsConnected() {
+			t.Fatal("Expected to be connected")
+		}
+
+		// Changing value should disconnect
+		manager.SetProxyProtocol(1)
+		if manager.IsConnected() {
+			t.Error("Expected to be disconnected after changing proxy protocol")
+		}
+
+		// Reconnect and verify new value persists
+		if err := manager.Connect(); err != nil {
+			t.Fatalf("Failed to reconnect: %v", err)
+		}
+		if manager.GetProxyProtocol() != 1 {
+			t.Errorf("Expected proxy protocol 1 after reconnect, got %d", manager.GetProxyProtocol())
+		}
+	})
+}
+
 // TestAuthenticationMethods verifies that the SSH client config includes both
 // publickey and keyboard-interactive authentication methods.
 func TestAuthenticationMethods(t *testing.T) {

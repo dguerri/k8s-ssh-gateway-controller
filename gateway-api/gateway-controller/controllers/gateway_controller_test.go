@@ -260,6 +260,8 @@ func (m *mockSSHTunnelManager) IsConnected() bool {
 	return true
 }
 
+func (m *mockSSHTunnelManager) SetProxyProtocol(version int) {}
+
 func forwardingKey(hostname string, port int) string {
 	return fmt.Sprintf("%s:%d", hostname, port)
 }

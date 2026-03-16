@@ -71,6 +71,27 @@ The SSH Gateway API Controller can be configured using the following environment
 - **Example**: `GATEWAY_CONTROLLER_NAME=example.com/my-ssh-controller`
 - **Note**: Must match the `spec.controllerName` in your GatewayClass resources
 
+## GatewayClass Annotations
+
+### `ssh-gateway.io/proxy-protocol`
+- **Description**: Enables PROXY protocol on the SSH tunnel session, allowing backends to see the original client IP address
+- **Default**: `` (empty, PROXY protocol disabled)
+- **Values**: `1` (PROXY protocol v1), `2` (PROXY protocol v2)
+- **Example**:
+  ```yaml
+  apiVersion: gateway.networking.k8s.io/v1
+  kind: GatewayClass
+  metadata:
+    name: my-gateway-class
+    annotations:
+      ssh-gateway.io/proxy-protocol: "1"
+  spec:
+    controllerName: pico.sh/ssh-gateway-api-controller
+  ```
+- **Equivalent to**: `ssh pico.sh proxy-protocol=1`
+- **Note**: This is a session-level setting that applies to all Gateways and listeners using this GatewayClass. Only enable this if your backend services support PROXY protocol — backends that are not PROXY-protocol-aware will see malformed requests.
+- **Scope**: Per GatewayClass. If you need some backends with and some without PROXY protocol, use separate GatewayClasses (and separate controller deployments).
+
 ### Logging Configuration
 
 #### `SLOG_LEVEL`

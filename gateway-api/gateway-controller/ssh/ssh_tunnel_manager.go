@@ -96,6 +96,7 @@ type SSHTunnelManager struct {
 	addressVerificationTimeout time.Duration
 	clientMu                   sync.RWMutex
 	addrNotifMu                sync.RWMutex
+	proxyProtocol              int
 	connected                  bool
 }
 
@@ -363,6 +364,34 @@ func (m *SSHTunnelManager) IsConnected() bool {
 	m.clientMu.RLock()
 	defer m.clientMu.RUnlock()
 	return m.connected
+}
+
+// SetProxyProtocol sets the PROXY protocol version (0=disabled, 1 or 2).
+// If the version changes and the manager is connected, it disconnects so
+// the next Connect() re-establishes the session with the new setting.
+func (m *SSHTunnelManager) SetProxyProtocol(version int) {
+	m.clientMu.Lock()
+	defer m.clientMu.Unlock()
+
+	if m.proxyProtocol == version {
+		return
+	}
+
+	slog.With("function", "SetProxyProtocol").Info("proxy protocol version changed",
+		"old", m.proxyProtocol, "new", version)
+	m.proxyProtocol = version
+
+	if m.connected {
+		slog.With("function", "SetProxyProtocol").Info("disconnecting to apply new proxy protocol setting")
+		m.closeClient()
+	}
+}
+
+// GetProxyProtocol returns the current PROXY protocol version.
+func (m *SSHTunnelManager) GetProxyProtocol() int {
+	m.clientMu.RLock()
+	defer m.clientMu.RUnlock()
+	return m.proxyProtocol
 }
 
 // ForwardRequest is the type of forwarding request to send.
@@ -792,9 +821,18 @@ func (m *SSHTunnelManager) captureServerOutput() {
 		return
 	}
 
-	if err := session.Shell(); err != nil {
-		slog.With("function", "captureServerOutput").Error("failed to start remote session", "error", err)
-		return
+	if m.proxyProtocol > 0 {
+		cmd := fmt.Sprintf("proxy-protocol=%d", m.proxyProtocol)
+		slog.With("function", "captureServerOutput").Info("starting session with proxy protocol", "command", cmd)
+		if err := session.Start(cmd); err != nil {
+			slog.With("function", "captureServerOutput").Error("failed to start remote session with proxy protocol", "error", err)
+			return
+		}
+	} else {
+		if err := session.Shell(); err != nil {
+			slog.With("function", "captureServerOutput").Error("failed to start remote session", "error", err)
+			return
+		}
 	}
 
 	go m.readServerOutput(stdout, "stdout")

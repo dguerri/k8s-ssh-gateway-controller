@@ -1,0 +1,58 @@
+---
+# Example: GatewayClass with PROXY protocol v1 enabled
+#
+# The ssh-gateway.io/proxy-protocol annotation on the GatewayClass tells the
+# SSH server (e.g., pico.sh) to prepend PROXY protocol headers when forwarding
+# traffic through the tunnel. This allows backends to see the original client IP.
+#
+# Valid values: "1" (PROXY protocol v1) or "2" (PROXY protocol v2)
+# If omitted or empty, PROXY protocol is disabled.
+#
+# Equivalent to: ssh pico.sh proxy-protocol=1
+#
+# NOTE: Only enable this if your backend supports PROXY protocol.
+#       Backends that are not PROXY-protocol-aware will see malformed requests.
+#
+# This is a session-level setting that applies to all Gateways and listeners
+# using this GatewayClass. If you need some backends with and some without
+# PROXY protocol, use separate GatewayClasses (and separate controller deployments).
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: pico-sh-gateway-cl-proxy-protocol
+  annotations:
+    ssh-gateway.io/proxy-protocol: "1"
+spec:
+  controllerName: pico.sh/ssh-gateway-api-controller
+
+---
+# Gateway using the proxy-protocol-enabled GatewayClass
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: pico-sh-proxy-protocol-gw
+  namespace: ssh-gateway-system
+spec:
+  gatewayClassName: pico-sh-gateway-cl-proxy-protocol
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      hostname: my-web-app
+
+---
+# HTTPRoute pointing to a PROXY-protocol-aware backend
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: my-web-app-route
+  namespace: ssh-gateway-system
+spec:
+  parentRefs:
+    - name: pico-sh-proxy-protocol-gw
+      sectionName: http
+  rules:
+    - backendRefs:
+        - name: my-web-app-svc
+          port: 8080

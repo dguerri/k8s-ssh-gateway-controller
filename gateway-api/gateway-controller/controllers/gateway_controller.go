@@ -87,6 +87,7 @@ type SSHTunnelManagerInterface interface {
 	Stop()
 	Connect() error
 	IsConnected() bool
+	SetProxyProtocol(version int)
 }
 
 type GatewayReconciler struct {
@@ -416,19 +417,27 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// Not deleting — if we don't yet own it, check GatewayClass to decide adoption
-	if !isManagedByUs {
-		var gc gatewayv1.GatewayClass
-		if err := r.Get(ctx, client.ObjectKey{Name: string(k8sGw.Spec.GatewayClassName)}, &gc); err != nil {
-			return ctrl.Result{}, err
-		}
+	// Fetch GatewayClass to check ownership and read annotations
+	var gc gatewayv1.GatewayClass
+	if err := r.Get(ctx, client.ObjectKey{Name: string(k8sGw.Spec.GatewayClassName)}, &gc); err != nil {
+		return ctrl.Result{}, err
+	}
 
+	if !isManagedByUs {
 		controllerName := getGatewayControllerName()
 		if string(gc.Spec.ControllerName) != controllerName {
 			slog.With("function", "Reconcile").Debug("skipping Gateway: does not match controllerName", "gatewayClassName", k8sGw.Spec.GatewayClassName)
 			return ctrl.Result{}, nil
 		}
 	}
+
+	// Apply proxy protocol setting from GatewayClass annotation
+	proxyProtocol := parseProxyProtocol(gc.Annotations)
+	if proxyProtocol > 0 {
+		slog.With("function", "Reconcile").Info("proxy protocol enabled from GatewayClass",
+			"gatewayClass", gc.Name, "version", proxyProtocol)
+	}
+	r.manager.SetProxyProtocol(proxyProtocol)
 
 	// Handle add or update
 	slog.With("function", "Reconcile", "gateway", req.NamespacedName).Debug("adding or updating gateway")
@@ -604,7 +613,7 @@ func (r *GatewayReconciler) updateGatewayStatusIfChanged(ctx context.Context, k8
 	return nil
 }
 
-func (r *GatewayReconciler) handleAddOrUpdateGateway(ctx context.Context, k8sGw *gatewayv1.Gateway) error {
+func (r *GatewayReconciler) handleAddOrUpdateGateway(_ context.Context, k8sGw *gatewayv1.Gateway) error {
 	r.gatewaysMu.Lock()
 	defer r.gatewaysMu.Unlock()
 

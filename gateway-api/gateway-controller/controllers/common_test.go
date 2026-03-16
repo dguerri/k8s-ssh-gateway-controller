@@ -299,6 +299,67 @@ func TestGetGatewayFinalizer(t *testing.T) {
 	})
 }
 
+func TestParseProxyProtocol(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		expected    int
+	}{
+		{
+			name:        "no annotations",
+			annotations: nil,
+			expected:    0,
+		},
+		{
+			name:        "empty annotations",
+			annotations: map[string]string{},
+			expected:    0,
+		},
+		{
+			name:        "annotation absent",
+			annotations: map[string]string{"other": "value"},
+			expected:    0,
+		},
+		{
+			name:        "annotation empty string",
+			annotations: map[string]string{annotationProxyProtocol: ""},
+			expected:    0,
+		},
+		{
+			name:        "version 1",
+			annotations: map[string]string{annotationProxyProtocol: "1"},
+			expected:    1,
+		},
+		{
+			name:        "version 2",
+			annotations: map[string]string{annotationProxyProtocol: "2"},
+			expected:    2,
+		},
+		{
+			name:        "invalid version 0",
+			annotations: map[string]string{annotationProxyProtocol: "0"},
+			expected:    0,
+		},
+		{
+			name:        "invalid version 3",
+			annotations: map[string]string{annotationProxyProtocol: "3"},
+			expected:    0,
+		},
+		{
+			name:        "invalid non-numeric",
+			annotations: map[string]string{annotationProxyProtocol: "foo"},
+			expected:    0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := parseProxyProtocol(tt.annotations)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
 func TestExtractHostnameFromURI(t *testing.T) {
 	tests := []struct {
 		name     string
