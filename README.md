@@ -6,7 +6,6 @@
 [![CI](https://github.com/dguerri/k8s-ssh-gateway-controller/actions/workflows/ci.yml/badge.svg)](https://github.com/dguerri/k8s-ssh-gateway-controller/actions/workflows/ci.yml)
 [![Coverage Status](https://coveralls.io/repos/github/dguerri/k8s-ssh-gateway-controller/badge.svg?branch=main)](https://coveralls.io/github/dguerri/k8s-ssh-gateway-controller?branch=main)
 
-
 ## Overview
 
 This Kubernetes Gateway API controller enables exposing Kubernetes services through SSH tunnels. It works with any SSH tunneling provider that supports reverse port forwarding, including:
@@ -23,7 +22,7 @@ The controller establishes SSH connections to external SSH servers and creates r
 2. Creates reverse port forwards for each listener
 3. Routes traffic from the SSH server back to Kubernetes services
 
-```
+```text
 Client Browser
     |
     V
@@ -44,12 +43,14 @@ Pods selected by your service
 ### Pico.sh
 
 [Pico.sh](https://pico.sh/tuns) is a premium SSH tunneling service that provides:
+
 - Automatic TLS termination
 - Custom domains
 - Multi-region support
 - Per-site analytics
 
 **Configuration:**
+
 ```yaml
 env:
 - name: SSH_SERVER
@@ -61,6 +62,7 @@ env:
 ```
 
 **Usage:**
+
 ```bash
 # Your services will be available at:
 # https://your-username-service-name.tuns.sh
@@ -72,6 +74,7 @@ env:
 [Serveo](https://serveo.net) is a free SSH tunneling service.
 
 **Configuration:**
+
 ```yaml
 env:
 - name: SSH_SERVER
@@ -83,6 +86,7 @@ env:
 ```
 
 **Usage:**
+
 ```bash
 # Your services will be available at:
 # https://your-service-name.serveo.net
@@ -93,6 +97,7 @@ env:
 You can use any SSH server with reverse port forwarding enabled.
 
 **Configuration:**
+
 ```yaml
 env:
 - name: SSH_SERVER
@@ -104,6 +109,7 @@ env:
 ```
 
 **SSH Server Requirements:**
+
 - `AllowTcpForwarding yes` in sshd_config
 - `GatewayPorts yes` in sshd_config (for binding to all interfaces)
 - User must have permission to bind to ports
@@ -170,6 +176,7 @@ kubectl apply -f example-app/combined.yaml
 ```
 
 This creates:
+
 - A TCP echo server deployment
 - A service exposing the echo server
 - A Gateway with HTTP and TCP listeners
@@ -196,18 +203,21 @@ tcp-echo-server-7cbfdb4c5f-hdmkc   1/1     Running   0          16s     10.50.46
 Depending on your SSH provider, your services will be available at:
 
 **Pico.sh:**
+
 ```sh
 curl https://your-username-web-test.tuns.sh
 nc your-username-web-test.tuns.sh 59123
 ```
 
 **Serveo:**
+
 ```sh
 curl https://web-test.serveo.net
 nc web-test.serveo.net 59123
 ```
 
 **Custom SSH server:**
+
 ```sh
 curl http://your-ssh-server.com:80
 nc your-ssh-server.com 59123
@@ -220,7 +230,7 @@ nc your-ssh-server.com 59123
 The controller can be configured using the following environment variables:
 
 | Variable | Default | Description |
-|----------|---------|-------------|
+| ---------- | --------- | ------------- |
 | `SSH_SERVER` | `localhost:22` | SSH server address and port |
 | `SSH_USERNAME` | `tunnel-user` | SSH username |
 | `SSH_PRIVATE_KEY_PATH` | `/ssh/id` | Path to SSH private key |
@@ -307,6 +317,7 @@ make install-hooks
 ```
 
 This will run `fmt`, `vet`, `lint`, and `test` before each commit. To skip the hook:
+
 ```sh
 git commit --no-verify
 ```
@@ -331,11 +342,13 @@ See [Installation](#installation) section for build instructions.
 ## Clean up
 
 Demo app:
+
 ```sh
 kubectl delete -f example-app/combined.yaml
 ```
 
 Controller:
+
 ```sh
 kubectl delete -f k8s/combined.yaml
 ```
