@@ -42,90 +42,94 @@ linters:
     - goconst       # Repeated strings - minor optimization
     - revive        # Naming conventions - existing codebase style
 
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-    check-blank: false  # Allow assignment to blank identifier
-    exclude-functions:
-      - (io.Closer).Close
-      - (*net.Conn).Close
-      - (net.Conn).Close
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+      exclude-functions:
+        - (io.Closer).Close
+        - (*net.Conn).Close
+        - (net.Conn).Close
 
-  govet:
-    enable-all: true
-    disable:
-      - shadow  # Too strict for this codebase
-      - fieldalignment  # Struct field alignment - micro-optimization
+    govet:
+      enable-all: true
+      disable:
+        - shadow
+        - fieldalignment
 
-  gocyclo:
-    min-complexity: 15
+    gocyclo:
+      min-complexity: 15
 
-  goconst:
-    min-len: 3
-    min-occurrences: 3
+    goconst:
+      min-len: 3
+      min-occurrences: 3
 
-  misspell:
-    locale: US
+    misspell:
+      locale: US
 
-  revive:
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+        - name: error-return
+          disabled: false
+        - name: error-naming
+          disabled: false
+        - name: if-return
+          disabled: false
+        - name: var-naming
+          disabled: false
+        - name: package-comments
+          disabled: true
+        - name: unexported-return
+          disabled: true
+
+    gosec:
+      excludes:
+        - G404
+
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+
+  exclusions:
+    presets:
+      - comments
+      - std-error-handling
+      - common-false-positives
     rules:
-      - name: exported
-        disabled: true  # Too noisy for existing code
-      - name: error-return
-        disabled: false
-      - name: error-naming
-        disabled: false
-      - name: if-return
-        disabled: false
-      - name: var-naming
-        disabled: false
-      - name: package-comments
-        disabled: true
-      - name: unexported-return
-        disabled: true
+      # Exclude some linters from running on test files
+      - path: _test\.go
+        linters:
+          - gocyclo
+          - errcheck
+          - gosec
+          - unparam
+          - contextcheck
 
-  gosec:
-    excludes:
-      - G404  # Weak random number generator - OK for tests
+      # Exclude some linters from running on test fakes/helpers
+      - path: fakes\.go
+        linters:
+          - errcheck
 
-  errorlint:
-    errorf: true
-    asserts: true
-    comparison: true
+      # Exclude error checks in main.go where we exit anyway
+      - path: main\.go
+        linters:
+          - errcheck
+        text: "Error return value"
+
+      # Allow unused context parameters in reconcilers (Kubernetes convention)
+      - path: _controller\.go
+        linters:
+          - unparam
+        text: "`ctx` is unused"
 
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
-
-  exclude-rules:
-    # Exclude some linters from running on test files
-    - path: _test\.go
-      linters:
-        - gocyclo
-        - errcheck
-        - gosec
-        - unparam
-        - contextcheck
-
-    # Exclude some linters from running on test fakes/helpers
-    - path: fakes\.go
-      linters:
-        - errcheck
-
-    # Exclude error checks in main.go where we exit anyway
-    - path: main\.go
-      linters:
-        - errcheck
-      text: "Error return value"
-
-    # Allow unused context parameters in reconcilers (Kubernetes convention)
-    - path: _controller\.go
-      linters:
-        - unparam
-      text: "`ctx` is unused"
-
   new: false
 
 output:
   formats:
-    colored-line-number: {}
+    text: {}
