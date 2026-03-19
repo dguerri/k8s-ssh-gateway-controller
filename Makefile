@@ -39,9 +39,9 @@ pre-commit: fmt vet lint test ## Run all pre-commit checks
 
 install-hooks: ## Install git pre-commit hook
 	@echo "Installing git pre-commit hook..."
-	@echo '#!/bin/bash' > ../../.git/hooks/pre-commit
-	@echo 'cd gateway-api/gateway-controller && make pre-commit' >> ../../.git/hooks/pre-commit
-	@chmod +x ../../.git/hooks/pre-commit
+	@echo '#!/bin/bash' > .git/hooks/pre-commit
+	@echo 'make pre-commit' >> .git/hooks/pre-commit
+	@chmod +x .git/hooks/pre-commit
 	@echo "✓ Git pre-commit hook installed!"
 	@echo "  Hook will run: fmt, vet, lint, and test"
 	@echo "  To skip: git commit --no-verify"

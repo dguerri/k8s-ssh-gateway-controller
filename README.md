@@ -118,7 +118,6 @@ env:
 The controller is not available on any upstream docker registry. You need to build the image and upload it in a registry accessible by your Kubernetes cluster.
 
 ```sh
-cd gateway-api/gateway-controller
 docker build . -t ssh-gateway-api-controller:latest
 docker tag ssh-gateway-api-controller:latest my-docker-registry.home.me:5001/ssh-gateway-api-controller:latest
 docker push my-docker-registry.home.me:5001/ssh-gateway-api-controller
@@ -126,7 +125,7 @@ docker push my-docker-registry.home.me:5001/ssh-gateway-api-controller
 
 ### 2. Configure the Kubernetes manifests
 
-Edit `gateway-api/k8s/combined.yaml` and provide:
+Edit `k8s/combined.yaml` and provide:
 
 - The name of the Docker image containing the controller (built above, including the registry)
 - Your SSH private key (base64-encoded)
@@ -145,7 +144,7 @@ base64 -w0 < $HOME/.ssh/id_rsa
 The following must be run as a Kubernetes administrator:
 
 ```sh
-kubectl apply -f gateway-api/k8s/combined.yaml
+kubectl apply -f k8s/combined.yaml
 ```
 
 Verify that everything is working:
@@ -170,7 +169,7 @@ time=2025-05-07T20:25:14.718Z level=INFO msg="starting manager"
 Run the following as any user, in any namespace where you have permission to create deployments, services, and gateways:
 
 ```sh
-kubectl apply -f example-apps/gateway-api/combined.yaml
+kubectl apply -f example-app/combined.yaml
 ```
 
 This creates:
@@ -291,8 +290,6 @@ The project uses [golangci-lint](https://golangci-lint.run/) for static code ana
 
 #### Running Linters
 
-From the `gateway-api/gateway-controller` directory:
-
 ```sh
 # Run linters
 make lint
@@ -309,7 +306,6 @@ make pre-commit
 Install the pre-commit hook to automatically run checks before each commit:
 
 ```sh
-cd gateway-api/gateway-controller
 make install-hooks
 ```
 
@@ -339,12 +335,12 @@ See [Installation](#installation) section for build instructions.
 
 Demo app:
 ```sh
-kubectl delete -f example-apps/gateway-api/combined.yaml
+kubectl delete -f example-app/combined.yaml
 ```
 
 Controller:
 ```sh
-kubectl delete -f gateway-api/k8s/combined.yaml
+kubectl delete -f k8s/combined.yaml
 ```
 
 ## License
