@@ -3,7 +3,7 @@
 [![license](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![go report card](https://goreportcard.com/badge/github.com/dguerri/k8s-ssh-gateway-controller)](https://goreportcard.com/report/github.com/dguerri/k8s-ssh-gateway-controller)
 [![Conventional Commits](https://img.shields.io/badge/Conventional%20Commits-1.0.0-yellow.svg)](https://conventionalcommits.org)
-[![CI](https://github.com/dguerri/k8s-ssh-gateway-controller/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/dguerri/k8s-ssh-gateway-controller/actions/workflows/docker-publish.yml)
+[![CI](https://github.com/dguerri/k8s-ssh-gateway-controller/actions/workflows/ci.yml/badge.svg)](https://github.com/dguerri/k8s-ssh-gateway-controller/actions/workflows/ci.yml)
 [![Coverage Status](https://coveralls.io/repos/github/dguerri/k8s-ssh-gateway-controller/badge.svg?branch=main)](https://coveralls.io/github/dguerri/k8s-ssh-gateway-controller?branch=main)
 
 ## Disclaimer
