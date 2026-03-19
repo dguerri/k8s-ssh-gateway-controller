@@ -2,10 +2,18 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	sshmgr "github.com/dguerri/k8s-ssh-gateway-controller/ssh"
@@ -232,8 +240,14 @@ func TestUpdateGatewayAddresses_GatewayNotFound(t *testing.T) {
 
 // Mock SSH Tunnel Manager for testing
 type mockSSHTunnelManager struct {
-	assignedAddrs map[string][]string
-	connected     bool
+	assignedAddrs        map[string][]string
+	connected            bool
+	startForwardingErr   error
+	stopForwardingErr    error
+	connectErr           error
+	proxyProtocolVersion int
+	stopForwardingCalls  []sshmgr.ForwardingConfig
+	startForwardingCalls []sshmgr.ForwardingConfig
 }
 
 func (m *mockSSHTunnelManager) GetAssignedAddresses(hostname string, port int) []string {
@@ -242,25 +256,32 @@ func (m *mockSSHTunnelManager) GetAssignedAddresses(hostname string, port int) [
 }
 
 func (m *mockSSHTunnelManager) StartForwarding(config sshmgr.ForwardingConfig) error {
-	return nil
+	m.startForwardingCalls = append(m.startForwardingCalls, config)
+	return m.startForwardingErr
 }
 
 func (m *mockSSHTunnelManager) StopForwarding(config *sshmgr.ForwardingConfig) error {
-	return nil
+	m.stopForwardingCalls = append(m.stopForwardingCalls, *config)
+	return m.stopForwardingErr
 }
 
 func (m *mockSSHTunnelManager) Stop() {}
 
 func (m *mockSSHTunnelManager) Connect() error {
+	if m.connectErr != nil {
+		return m.connectErr
+	}
 	m.connected = true
 	return nil
 }
 
 func (m *mockSSHTunnelManager) IsConnected() bool {
-	return true
+	return m.connected
 }
 
-func (m *mockSSHTunnelManager) SetProxyProtocol(version int) {}
+func (m *mockSSHTunnelManager) SetProxyProtocol(version int) {
+	m.proxyProtocolVersion = version
+}
 
 func forwardingKey(hostname string, port int) string {
 	return fmt.Sprintf("%s:%d", hostname, port)
@@ -629,5 +650,1306 @@ func TestSetRoute_ValidatesForwarding(t *testing.T) {
 		gw := reconciler.gateways["test-ns/test-gw"]
 		listener := gw.listeners["http"]
 		assert.NotNil(t, listener.route)
+	})
+}
+
+// --- Tests for handleForwardingError ---
+
+func TestHandleForwardingError(t *testing.T) {
+	t.Run("ErrSSHClientNotReady returns ErrGatewayNotReady", func(t *testing.T) {
+		reconciler := &GatewayReconciler{
+			gateways: map[string]*gateway{},
+		}
+		l := &Listener{Hostname: "example.com", Port: 80}
+		route := &Route{Name: "test-route", Namespace: "test-ns", Host: "backend", Port: 8080}
+
+		err := reconciler.handleForwardingError(
+			&sshmgr.ErrSSHClientNotReady{},
+			l, route, "test-ns/test-gw", "test-route", "test-ns", "http",
+		)
+
+		assert.Error(t, err)
+		var notReadyErr *ErrGatewayNotReady
+		assert.True(t, errors.As(err, &notReadyErr))
+	})
+
+	t.Run("ErrSSHForwardingExists returns nil and sets route", func(t *testing.T) {
+		reconciler := &GatewayReconciler{
+			gateways: map[string]*gateway{},
+		}
+		l := &Listener{Hostname: "example.com", Port: 80}
+		route := &Route{Name: "test-route", Namespace: "test-ns", Host: "backend", Port: 8080}
+
+		err := reconciler.handleForwardingError(
+			&sshmgr.ErrSSHForwardingExists{Key: "example.com:80"},
+			l, route, "test-ns/test-gw", "test-route", "test-ns", "http",
+		)
+
+		assert.NoError(t, err)
+		assert.NotNil(t, l.route)
+		assert.Equal(t, "test-route", l.route.Name)
+		assert.Equal(t, "test-ns", l.route.Namespace)
+	})
+
+	t.Run("generic error returns wrapped error", func(t *testing.T) {
+		reconciler := &GatewayReconciler{
+			gateways: map[string]*gateway{},
+		}
+		l := &Listener{Hostname: "example.com", Port: 80}
+		route := &Route{Name: "test-route", Namespace: "test-ns", Host: "backend", Port: 8080}
+
+		genericErr := fmt.Errorf("some network error")
+		err := reconciler.handleForwardingError(
+			genericErr,
+			l, route, "test-ns/test-gw", "test-route", "test-ns", "http",
+		)
+
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to start forwarding")
+		assert.True(t, errors.Is(err, genericErr))
+	})
+}
+
+// --- Tests for handleAddOrUpdateGateway ---
+
+func TestHandleAddOrUpdateGateway(t *testing.T) {
+	t.Run("new gateway creates gateway entry with correct listeners", func(t *testing.T) {
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{},
+			connected:     true,
+		}
+		reconciler := &GatewayReconciler{
+			manager:  mockManager,
+			gateways: map[string]*gateway{},
+		}
+
+		hostname := gatewayv1.Hostname("example.com")
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gw",
+				Namespace: "test-ns",
+			},
+			Spec: gatewayv1.GatewaySpec{
+				Listeners: []gatewayv1.Listener{
+					{
+						Name:     "http",
+						Hostname: &hostname,
+						Port:     80,
+						Protocol: "HTTP",
+					},
+					{
+						Name:     "tcp",
+						Port:     3306,
+						Protocol: "TCP",
+					},
+				},
+			},
+		}
+
+		err := reconciler.handleAddOrUpdateGateway(context.TODO(), k8sGw)
+		assert.NoError(t, err)
+
+		gw, exists := reconciler.gateways["test-ns/test-gw"]
+		assert.True(t, exists)
+		assert.Len(t, gw.listeners, 2)
+		assert.Equal(t, "example.com", gw.listeners["http"].Hostname)
+		assert.Equal(t, 80, gw.listeners["http"].Port)
+		assert.Equal(t, "localhost", gw.listeners["tcp"].Hostname)
+		assert.Equal(t, 3306, gw.listeners["tcp"].Port)
+	})
+
+	t.Run("existing gateway unchanged listeners preserves existing routes", func(t *testing.T) {
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{},
+			connected:     true,
+		}
+		existingRoute := &Route{Name: "my-route", Namespace: "test-ns", Host: "backend", Port: 8080}
+		reconciler := &GatewayReconciler{
+			manager: mockManager,
+			gateways: map[string]*gateway{
+				"test-ns/test-gw": {
+					listeners: map[string]*Listener{
+						"http": {
+							Hostname: "example.com",
+							Port:     80,
+							Protocol: "HTTP",
+							route:    existingRoute,
+						},
+					},
+				},
+			},
+		}
+
+		hostname := gatewayv1.Hostname("example.com")
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gw",
+				Namespace: "test-ns",
+			},
+			Spec: gatewayv1.GatewaySpec{
+				Listeners: []gatewayv1.Listener{
+					{
+						Name:     "http",
+						Hostname: &hostname,
+						Port:     80,
+						Protocol: "HTTP",
+					},
+				},
+			},
+		}
+
+		err := reconciler.handleAddOrUpdateGateway(context.TODO(), k8sGw)
+		assert.NoError(t, err)
+
+		gw := reconciler.gateways["test-ns/test-gw"]
+		assert.NotNil(t, gw.listeners["http"].route)
+		assert.Equal(t, "my-route", gw.listeners["http"].route.Name)
+	})
+
+	t.Run("existing gateway changed listener port stops forwarding and creates new listener", func(t *testing.T) {
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{},
+			connected:     true,
+		}
+		existingRoute := &Route{Name: "my-route", Namespace: "test-ns", Host: "backend", Port: 8080}
+		reconciler := &GatewayReconciler{
+			manager: mockManager,
+			gateways: map[string]*gateway{
+				"test-ns/test-gw": {
+					listeners: map[string]*Listener{
+						"http": {
+							Hostname: "example.com",
+							Port:     80,
+							Protocol: "HTTP",
+							route:    existingRoute,
+						},
+					},
+				},
+			},
+		}
+
+		hostname := gatewayv1.Hostname("example.com")
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gw",
+				Namespace: "test-ns",
+			},
+			Spec: gatewayv1.GatewaySpec{
+				Listeners: []gatewayv1.Listener{
+					{
+						Name:     "http",
+						Hostname: &hostname,
+						Port:     8080, // Changed port
+						Protocol: "HTTP",
+					},
+				},
+			},
+		}
+
+		err := reconciler.handleAddOrUpdateGateway(context.TODO(), k8sGw)
+		assert.NoError(t, err)
+
+		// Should have called StopForwarding for the old config
+		assert.Len(t, mockManager.stopForwardingCalls, 1)
+		assert.Equal(t, "example.com", mockManager.stopForwardingCalls[0].RemoteHost)
+		assert.Equal(t, 80, mockManager.stopForwardingCalls[0].RemotePort)
+
+		// New listener should have updated port and no route
+		gw := reconciler.gateways["test-ns/test-gw"]
+		assert.Equal(t, 8080, gw.listeners["http"].Port)
+		assert.Nil(t, gw.listeners["http"].route)
+	})
+
+	t.Run("existing gateway new listener added", func(t *testing.T) {
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{},
+			connected:     true,
+		}
+		reconciler := &GatewayReconciler{
+			manager: mockManager,
+			gateways: map[string]*gateway{
+				"test-ns/test-gw": {
+					listeners: map[string]*Listener{
+						"http": {
+							Hostname: "example.com",
+							Port:     80,
+							Protocol: "HTTP",
+						},
+					},
+				},
+			},
+		}
+
+		hostname := gatewayv1.Hostname("example.com")
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gw",
+				Namespace: "test-ns",
+			},
+			Spec: gatewayv1.GatewaySpec{
+				Listeners: []gatewayv1.Listener{
+					{
+						Name:     "http",
+						Hostname: &hostname,
+						Port:     80,
+						Protocol: "HTTP",
+					},
+					{
+						Name:     "tcp",
+						Port:     3306,
+						Protocol: "TCP",
+					},
+				},
+			},
+		}
+
+		err := reconciler.handleAddOrUpdateGateway(context.TODO(), k8sGw)
+		assert.NoError(t, err)
+
+		gw := reconciler.gateways["test-ns/test-gw"]
+		assert.Len(t, gw.listeners, 2)
+		assert.NotNil(t, gw.listeners["http"])
+		assert.NotNil(t, gw.listeners["tcp"])
+		assert.Equal(t, 3306, gw.listeners["tcp"].Port)
+		assert.Equal(t, "localhost", gw.listeners["tcp"].Hostname)
+	})
+
+	t.Run("existing gateway listener removed only keeps listeners from spec", func(t *testing.T) {
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{},
+			connected:     true,
+		}
+		reconciler := &GatewayReconciler{
+			manager: mockManager,
+			gateways: map[string]*gateway{
+				"test-ns/test-gw": {
+					listeners: map[string]*Listener{
+						"http": {
+							Hostname: "example.com",
+							Port:     80,
+							Protocol: "HTTP",
+						},
+						"tcp": {
+							Hostname: "localhost",
+							Port:     3306,
+							Protocol: "TCP",
+						},
+					},
+				},
+			},
+		}
+
+		hostname := gatewayv1.Hostname("example.com")
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gw",
+				Namespace: "test-ns",
+			},
+			Spec: gatewayv1.GatewaySpec{
+				Listeners: []gatewayv1.Listener{
+					{
+						Name:     "http",
+						Hostname: &hostname,
+						Port:     80,
+						Protocol: "HTTP",
+					},
+					// "tcp" listener removed from spec
+				},
+			},
+		}
+
+		err := reconciler.handleAddOrUpdateGateway(context.TODO(), k8sGw)
+		assert.NoError(t, err)
+
+		gw := reconciler.gateways["test-ns/test-gw"]
+		assert.Len(t, gw.listeners, 1)
+		assert.NotNil(t, gw.listeners["http"])
+		_, hasTCP := gw.listeners["tcp"]
+		assert.False(t, hasTCP)
+	})
+}
+
+// --- Tests for handleDeleteGateway ---
+
+func TestHandleDeleteGateway(t *testing.T) {
+	t.Run("deletes gateway with active routes and calls StopForwarding", func(t *testing.T) {
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{},
+			connected:     true,
+		}
+		reconciler := &GatewayReconciler{
+			manager: mockManager,
+			gateways: map[string]*gateway{
+				"test-ns/test-gw": {
+					listeners: map[string]*Listener{
+						"http": {
+							Hostname: "example.com",
+							Port:     80,
+							Protocol: "HTTP",
+							route: &Route{
+								Name:      "my-route",
+								Namespace: "test-ns",
+								Host:      "backend",
+								Port:      8080,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gw",
+				Namespace: "test-ns",
+			},
+		}
+
+		reconciler.handleDeleteGateway(context.TODO(), k8sGw)
+
+		// Gateway should be removed
+		_, exists := reconciler.gateways["test-ns/test-gw"]
+		assert.False(t, exists)
+
+		// StopForwarding should have been called
+		assert.Len(t, mockManager.stopForwardingCalls, 1)
+		assert.Equal(t, "example.com", mockManager.stopForwardingCalls[0].RemoteHost)
+		assert.Equal(t, 80, mockManager.stopForwardingCalls[0].RemotePort)
+		assert.Equal(t, "backend", mockManager.stopForwardingCalls[0].InternalHost)
+		assert.Equal(t, 8080, mockManager.stopForwardingCalls[0].InternalPort)
+	})
+
+	t.Run("deletes gateway with no routes", func(t *testing.T) {
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{},
+			connected:     true,
+		}
+		reconciler := &GatewayReconciler{
+			manager: mockManager,
+			gateways: map[string]*gateway{
+				"test-ns/test-gw": {
+					listeners: map[string]*Listener{
+						"http": {
+							Hostname: "example.com",
+							Port:     80,
+							Protocol: "HTTP",
+							// no route
+						},
+					},
+				},
+			},
+		}
+
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gw",
+				Namespace: "test-ns",
+			},
+		}
+
+		reconciler.handleDeleteGateway(context.TODO(), k8sGw)
+
+		_, exists := reconciler.gateways["test-ns/test-gw"]
+		assert.False(t, exists)
+
+		// StopForwarding should NOT have been called (no route)
+		assert.Len(t, mockManager.stopForwardingCalls, 0)
+	})
+
+	t.Run("deletes non-existent gateway without panic", func(t *testing.T) {
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{},
+			connected:     true,
+		}
+		reconciler := &GatewayReconciler{
+			manager:  mockManager,
+			gateways: map[string]*gateway{},
+		}
+
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "non-existent",
+				Namespace: "test-ns",
+			},
+		}
+
+		// Should not panic
+		assert.NotPanics(t, func() {
+			reconciler.handleDeleteGateway(context.TODO(), k8sGw)
+		})
+	})
+}
+
+// --- Tests for RemoveRoute ---
+
+func TestRemoveRoute(t *testing.T) {
+	t.Run("remove existing route successfully", func(t *testing.T) {
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{},
+			connected:     true,
+		}
+		reconciler := &GatewayReconciler{
+			manager: mockManager,
+			gateways: map[string]*gateway{
+				"test-ns/test-gw": {
+					listeners: map[string]*Listener{
+						"http": {
+							Hostname: "example.com",
+							Port:     80,
+							Protocol: "HTTP",
+							route: &Route{
+								Name:      "test-route",
+								Namespace: "test-ns",
+								Host:      "backend",
+								Port:      8080,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		err := reconciler.RemoveRoute(context.TODO(), "test-ns", "test-gw", "http", "test-route", "test-ns", "backend", 8080)
+		assert.NoError(t, err)
+
+		// Route should be nil now
+		gw := reconciler.gateways["test-ns/test-gw"]
+		assert.Nil(t, gw.listeners["http"].route)
+
+		// StopForwarding should have been called
+		assert.Len(t, mockManager.stopForwardingCalls, 1)
+		assert.Equal(t, "example.com", mockManager.stopForwardingCalls[0].RemoteHost)
+		assert.Equal(t, 80, mockManager.stopForwardingCalls[0].RemotePort)
+	})
+
+	t.Run("gateway not found returns ErrGatewayNotFound", func(t *testing.T) {
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{},
+			connected:     true,
+		}
+		reconciler := &GatewayReconciler{
+			manager:  mockManager,
+			gateways: map[string]*gateway{},
+		}
+
+		err := reconciler.RemoveRoute(context.TODO(), "test-ns", "test-gw", "http", "test-route", "test-ns", "backend", 8080)
+		assert.Error(t, err)
+		var notFoundErr *ErrGatewayNotFound
+		assert.True(t, errors.As(err, &notFoundErr))
+	})
+
+	t.Run("route not found returns ErrRouteNotFound", func(t *testing.T) {
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{},
+			connected:     true,
+		}
+		reconciler := &GatewayReconciler{
+			manager: mockManager,
+			gateways: map[string]*gateway{
+				"test-ns/test-gw": {
+					listeners: map[string]*Listener{
+						"http": {
+							Hostname: "example.com",
+							Port:     80,
+							Protocol: "HTTP",
+							// no route attached
+						},
+					},
+				},
+			},
+		}
+
+		err := reconciler.RemoveRoute(context.TODO(), "test-ns", "test-gw", "http", "test-route", "test-ns", "backend", 8080)
+		assert.Error(t, err)
+		var notFoundErr *ErrRouteNotFound
+		assert.True(t, errors.As(err, &notFoundErr))
+	})
+
+	t.Run("StopForwarding fails returns error", func(t *testing.T) {
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs:     map[string][]string{},
+			connected:         true,
+			stopForwardingErr: fmt.Errorf("SSH tunnel broken"),
+		}
+		reconciler := &GatewayReconciler{
+			manager: mockManager,
+			gateways: map[string]*gateway{
+				"test-ns/test-gw": {
+					listeners: map[string]*Listener{
+						"http": {
+							Hostname: "example.com",
+							Port:     80,
+							Protocol: "HTTP",
+							route: &Route{
+								Name:      "test-route",
+								Namespace: "test-ns",
+								Host:      "backend",
+								Port:      8080,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		err := reconciler.RemoveRoute(context.TODO(), "test-ns", "test-gw", "http", "test-route", "test-ns", "backend", 8080)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to stop forwarding")
+	})
+}
+
+// --- Tests for GatewayClassReconciler.Reconcile ---
+
+func newGatewayTestScheme() *runtime.Scheme {
+	s := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(s)
+	_ = gatewayv1.Install(s)
+	return s
+}
+
+func TestGatewayClassReconciler_Reconcile(t *testing.T) {
+	t.Run("matching controller name sets Accepted=True condition", func(t *testing.T) {
+		t.Setenv("GATEWAY_CONTROLLER_NAME", "test-controller")
+		s := newGatewayTestScheme()
+
+		gc := &gatewayv1.GatewayClass{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "my-class",
+			},
+			Spec: gatewayv1.GatewayClassSpec{
+				ControllerName: "test-controller",
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(gc).
+			WithStatusSubresource(&gatewayv1.GatewayClass{}).
+			Build()
+
+		reconciler := &GatewayClassReconciler{
+			Client: fakeClient,
+			Scheme: s,
+		}
+
+		result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: "my-class"},
+		})
+
+		assert.NoError(t, err)
+		assert.Equal(t, ctrl.Result{}, result)
+
+		// Verify status was updated
+		var updated gatewayv1.GatewayClass
+		err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "my-class"}, &updated)
+		assert.NoError(t, err)
+		assert.Len(t, updated.Status.Conditions, 1)
+		assert.Equal(t, string(gatewayv1.GatewayClassConditionStatusAccepted), updated.Status.Conditions[0].Type)
+		assert.Equal(t, metav1.ConditionTrue, updated.Status.Conditions[0].Status)
+	})
+
+	t.Run("non-matching controller name does not update status", func(t *testing.T) {
+		t.Setenv("GATEWAY_CONTROLLER_NAME", "test-controller")
+		s := newGatewayTestScheme()
+
+		gc := &gatewayv1.GatewayClass{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "other-class",
+			},
+			Spec: gatewayv1.GatewayClassSpec{
+				ControllerName: "other-controller",
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(gc).
+			WithStatusSubresource(&gatewayv1.GatewayClass{}).
+			Build()
+
+		reconciler := &GatewayClassReconciler{
+			Client: fakeClient,
+			Scheme: s,
+		}
+
+		result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: "other-class"},
+		})
+
+		assert.NoError(t, err)
+		assert.Equal(t, ctrl.Result{}, result)
+
+		// Status should not have been updated
+		var updated gatewayv1.GatewayClass
+		err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "other-class"}, &updated)
+		assert.NoError(t, err)
+		assert.Len(t, updated.Status.Conditions, 0)
+	})
+
+	t.Run("GatewayClass not found returns no error", func(t *testing.T) {
+		t.Setenv("GATEWAY_CONTROLLER_NAME", "test-controller")
+		s := newGatewayTestScheme()
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(s).
+			Build()
+
+		reconciler := &GatewayClassReconciler{
+			Client: fakeClient,
+			Scheme: s,
+		}
+
+		result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: "non-existent"},
+		})
+
+		assert.NoError(t, err)
+		assert.Equal(t, ctrl.Result{}, result)
+	})
+}
+
+// --- Tests for GatewayReconciler.Reconcile ---
+
+func TestGatewayReconciler_Reconcile(t *testing.T) {
+	t.Run("SSH disconnected reconnect succeeds proceeds normally", func(t *testing.T) {
+		t.Setenv("GATEWAY_CONTROLLER_NAME", "test-controller")
+		s := newGatewayTestScheme()
+
+		gc := &gatewayv1.GatewayClass{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "my-class",
+			},
+			Spec: gatewayv1.GatewayClassSpec{
+				ControllerName: "test-controller",
+			},
+		}
+
+		hostname := gatewayv1.Hostname("example.com")
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gw",
+				Namespace: "test-ns",
+			},
+			Spec: gatewayv1.GatewaySpec{
+				GatewayClassName: "my-class",
+				Listeners: []gatewayv1.Listener{
+					{
+						Name:     "http",
+						Hostname: &hostname,
+						Port:     80,
+						Protocol: "HTTP",
+					},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(gc, k8sGw).
+			WithStatusSubresource(&gatewayv1.Gateway{}).
+			Build()
+
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{},
+			connected:     false, // SSH disconnected
+		}
+
+		reconciler := &GatewayReconciler{
+			Client:   fakeClient,
+			Scheme:   s,
+			manager:  mockManager,
+			gateways: map[string]*gateway{},
+		}
+
+		result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: "test-ns", Name: "test-gw"},
+		})
+
+		assert.NoError(t, err)
+		assert.Equal(t, gatewayReconcilePeriod, result.RequeueAfter)
+		// Connect should have been called and succeeded
+		assert.True(t, mockManager.connected)
+	})
+
+	t.Run("SSH disconnected reconnect fails requeues after 10s", func(t *testing.T) {
+		t.Setenv("GATEWAY_CONTROLLER_NAME", "test-controller")
+		s := newGatewayTestScheme()
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(s).
+			Build()
+
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{},
+			connected:     false,
+			connectErr:    fmt.Errorf("connection refused"),
+		}
+
+		reconciler := &GatewayReconciler{
+			Client:   fakeClient,
+			Scheme:   s,
+			manager:  mockManager,
+			gateways: map[string]*gateway{},
+		}
+
+		result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: "test-ns", Name: "test-gw"},
+		})
+
+		assert.NoError(t, err)
+		assert.Equal(t, 10*time.Second, result.RequeueAfter)
+	})
+
+	t.Run("Gateway not found returns no error", func(t *testing.T) {
+		t.Setenv("GATEWAY_CONTROLLER_NAME", "test-controller")
+		s := newGatewayTestScheme()
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(s).
+			Build()
+
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{},
+			connected:     true,
+		}
+
+		reconciler := &GatewayReconciler{
+			Client:   fakeClient,
+			Scheme:   s,
+			manager:  mockManager,
+			gateways: map[string]*gateway{},
+		}
+
+		result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: "test-ns", Name: "non-existent"},
+		})
+
+		assert.NoError(t, err)
+		assert.Equal(t, ctrl.Result{}, result)
+	})
+
+	t.Run("Gateway being deleted with finalizer calls handleDeleteGateway and removes finalizer", func(t *testing.T) {
+		t.Setenv("GATEWAY_CONTROLLER_NAME", "test-controller")
+		s := newGatewayTestScheme()
+
+		now := metav1.Now()
+		finalizer := getGatewayFinalizer()
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "test-gw",
+				Namespace:         "test-ns",
+				DeletionTimestamp: &now,
+				Finalizers:        []string{finalizer},
+			},
+			Spec: gatewayv1.GatewaySpec{
+				GatewayClassName: "my-class",
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(k8sGw).
+			WithStatusSubresource(&gatewayv1.Gateway{}).
+			Build()
+
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{},
+			connected:     true,
+		}
+
+		reconciler := &GatewayReconciler{
+			Client:  fakeClient,
+			Scheme:  s,
+			manager: mockManager,
+			gateways: map[string]*gateway{
+				"test-ns/test-gw": {
+					listeners: map[string]*Listener{
+						"http": {
+							Hostname: "example.com",
+							Port:     80,
+							route: &Route{
+								Name:      "my-route",
+								Namespace: "test-ns",
+								Host:      "backend",
+								Port:      8080,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: "test-ns", Name: "test-gw"},
+		})
+
+		assert.NoError(t, err)
+		assert.Equal(t, ctrl.Result{}, result)
+
+		// Gateway should be removed from internal state
+		_, exists := reconciler.gateways["test-ns/test-gw"]
+		assert.False(t, exists)
+
+		// StopForwarding should have been called for the route
+		assert.Len(t, mockManager.stopForwardingCalls, 1)
+
+		// After removing the last finalizer from a deleted object, the fake client
+		// garbage-collects it, so we verify via internal state instead.
+	})
+
+	t.Run("Gateway being deleted without our finalizer skips", func(t *testing.T) {
+		t.Setenv("GATEWAY_CONTROLLER_NAME", "test-controller")
+		s := newGatewayTestScheme()
+
+		now := metav1.Now()
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "test-gw",
+				Namespace:         "test-ns",
+				DeletionTimestamp: &now,
+				Finalizers:        []string{"other-controller/finalizer"}, // Has a finalizer, but not ours
+			},
+			Spec: gatewayv1.GatewaySpec{
+				GatewayClassName: "my-class",
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(k8sGw).
+			WithStatusSubresource(&gatewayv1.Gateway{}).
+			Build()
+
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{},
+			connected:     true,
+		}
+
+		reconciler := &GatewayReconciler{
+			Client:   fakeClient,
+			Scheme:   s,
+			manager:  mockManager,
+			gateways: map[string]*gateway{},
+		}
+
+		result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: "test-ns", Name: "test-gw"},
+		})
+
+		assert.NoError(t, err)
+		assert.Equal(t, ctrl.Result{}, result)
+		// StopForwarding should NOT have been called (our finalizer was not present)
+		assert.Len(t, mockManager.stopForwardingCalls, 0)
+	})
+
+	t.Run("non-matching controller name skips", func(t *testing.T) {
+		t.Setenv("GATEWAY_CONTROLLER_NAME", "test-controller")
+		s := newGatewayTestScheme()
+
+		gc := &gatewayv1.GatewayClass{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "other-class",
+			},
+			Spec: gatewayv1.GatewayClassSpec{
+				ControllerName: "other-controller", // Not matching
+			},
+		}
+
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gw",
+				Namespace: "test-ns",
+			},
+			Spec: gatewayv1.GatewaySpec{
+				GatewayClassName: "other-class",
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(gc, k8sGw).
+			WithStatusSubresource(&gatewayv1.Gateway{}).
+			Build()
+
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{},
+			connected:     true,
+		}
+
+		reconciler := &GatewayReconciler{
+			Client:   fakeClient,
+			Scheme:   s,
+			manager:  mockManager,
+			gateways: map[string]*gateway{},
+		}
+
+		result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: "test-ns", Name: "test-gw"},
+		})
+
+		assert.NoError(t, err)
+		assert.Equal(t, ctrl.Result{}, result)
+		// Gateway should NOT be in internal state
+		_, exists := reconciler.gateways["test-ns/test-gw"]
+		assert.False(t, exists)
+	})
+
+	t.Run("normal add/update adds finalizer and processes gateway", func(t *testing.T) {
+		t.Setenv("GATEWAY_CONTROLLER_NAME", "test-controller")
+		s := newGatewayTestScheme()
+
+		gc := &gatewayv1.GatewayClass{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "my-class",
+			},
+			Spec: gatewayv1.GatewayClassSpec{
+				ControllerName: "test-controller",
+			},
+		}
+
+		hostname := gatewayv1.Hostname("example.com")
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gw",
+				Namespace: "test-ns",
+			},
+			Spec: gatewayv1.GatewaySpec{
+				GatewayClassName: "my-class",
+				Listeners: []gatewayv1.Listener{
+					{
+						Name:     "http",
+						Hostname: &hostname,
+						Port:     80,
+						Protocol: "HTTP",
+					},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(gc, k8sGw).
+			WithStatusSubresource(&gatewayv1.Gateway{}).
+			Build()
+
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{},
+			connected:     true,
+		}
+
+		reconciler := &GatewayReconciler{
+			Client:   fakeClient,
+			Scheme:   s,
+			manager:  mockManager,
+			gateways: map[string]*gateway{},
+		}
+
+		result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: "test-ns", Name: "test-gw"},
+		})
+
+		assert.NoError(t, err)
+		assert.Equal(t, gatewayReconcilePeriod, result.RequeueAfter)
+
+		// Finalizer should have been added
+		var updated gatewayv1.Gateway
+		err = fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "test-ns", Name: "test-gw"}, &updated)
+		assert.NoError(t, err)
+		assert.Contains(t, updated.Finalizers, getGatewayFinalizer())
+
+		// Gateway should be in internal state
+		gw, exists := reconciler.gateways["test-ns/test-gw"]
+		assert.True(t, exists)
+		assert.Len(t, gw.listeners, 1)
+		assert.Equal(t, "example.com", gw.listeners["http"].Hostname)
+	})
+}
+
+// --- Tests for updateGatewayStatus ---
+
+func TestUpdateGatewayStatus(t *testing.T) {
+	t.Run("successful update", func(t *testing.T) {
+		s := newGatewayTestScheme()
+
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gw",
+				Namespace: "test-ns",
+			},
+			Spec: gatewayv1.GatewaySpec{
+				GatewayClassName: "my-class",
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(k8sGw).
+			WithStatusSubresource(&gatewayv1.Gateway{}).
+			Build()
+
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{
+				"example.com:80": {"http://example.com"},
+			},
+			connected: true,
+		}
+
+		reconciler := &GatewayReconciler{
+			Client:  fakeClient,
+			Scheme:  s,
+			manager: mockManager,
+			gateways: map[string]*gateway{
+				"test-ns/test-gw": {
+					listeners: map[string]*Listener{
+						"http": {
+							Hostname: "example.com",
+							Port:     80,
+						},
+					},
+				},
+			},
+		}
+
+		err := reconciler.updateGatewayStatus(context.Background(), "test-ns", "test-gw")
+		assert.NoError(t, err)
+
+		// Verify status was updated
+		var updated gatewayv1.Gateway
+		err = fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "test-ns", Name: "test-gw"}, &updated)
+		assert.NoError(t, err)
+		assert.Len(t, updated.Status.Addresses, 1)
+		assert.Equal(t, "example.com", updated.Status.Addresses[0].Value)
+	})
+
+	t.Run("gateway not found returns error", func(t *testing.T) {
+		s := newGatewayTestScheme()
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(s).
+			Build()
+
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{},
+			connected:     true,
+		}
+
+		reconciler := &GatewayReconciler{
+			Client:   fakeClient,
+			Scheme:   s,
+			manager:  mockManager,
+			gateways: map[string]*gateway{},
+		}
+
+		err := reconciler.updateGatewayStatus(context.Background(), "test-ns", "non-existent")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to fetch Gateway")
+	})
+}
+
+// --- Tests for updateGatewayStatusIfChanged ---
+
+func TestUpdateGatewayStatusIfChanged(t *testing.T) {
+	t.Run("conditions changed updates status", func(t *testing.T) {
+		s := newGatewayTestScheme()
+
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gw",
+				Namespace: "test-ns",
+			},
+			Spec: gatewayv1.GatewaySpec{
+				GatewayClassName: "my-class",
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(k8sGw).
+			WithStatusSubresource(&gatewayv1.Gateway{}).
+			Build()
+
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{},
+			connected:     true,
+		}
+
+		reconciler := &GatewayReconciler{
+			Client:  fakeClient,
+			Scheme:  s,
+			manager: mockManager,
+			gateways: map[string]*gateway{
+				"test-ns/test-gw": {
+					listeners: map[string]*Listener{},
+				},
+			},
+		}
+
+		// Fetch the k8sGw fresh (so the resourceVersion is correct)
+		var fresh gatewayv1.Gateway
+		err := fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "test-ns", Name: "test-gw"}, &fresh)
+		assert.NoError(t, err)
+
+		err = reconciler.updateGatewayStatusIfChanged(context.Background(), &fresh, "test-ns/test-gw")
+		assert.NoError(t, err)
+
+		// Verify conditions were set
+		var updated gatewayv1.Gateway
+		err = fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "test-ns", Name: "test-gw"}, &updated)
+		assert.NoError(t, err)
+		assert.Len(t, updated.Status.Conditions, 2)
+	})
+
+	t.Run("addresses changed updates status", func(t *testing.T) {
+		s := newGatewayTestScheme()
+
+		// Pre-set Accepted+Programmed conditions so they don't change
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gw",
+				Namespace: "test-ns",
+			},
+			Spec: gatewayv1.GatewaySpec{
+				GatewayClassName: "my-class",
+			},
+			Status: gatewayv1.GatewayStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(gatewayv1.GatewayConditionAccepted),
+						Status:             metav1.ConditionTrue,
+						Reason:             "Accepted",
+						Message:            "Gateway accepted by controller",
+						LastTransitionTime: metav1.Now(),
+					},
+					{
+						Type:               string(gatewayv1.GatewayConditionProgrammed),
+						Status:             metav1.ConditionTrue,
+						Reason:             "Programmed",
+						Message:            "Gateway programmed successfully",
+						LastTransitionTime: metav1.Now(),
+					},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(k8sGw).
+			WithStatusSubresource(&gatewayv1.Gateway{}).
+			Build()
+
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{
+				"example.com:80": {"http://example.com"},
+			},
+			connected: true,
+		}
+
+		reconciler := &GatewayReconciler{
+			Client:  fakeClient,
+			Scheme:  s,
+			manager: mockManager,
+			gateways: map[string]*gateway{
+				"test-ns/test-gw": {
+					listeners: map[string]*Listener{
+						"http": {
+							Hostname: "example.com",
+							Port:     80,
+						},
+					},
+				},
+			},
+		}
+
+		// Fetch fresh so resourceVersion is correct
+		var fresh gatewayv1.Gateway
+		err := fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "test-ns", Name: "test-gw"}, &fresh)
+		assert.NoError(t, err)
+
+		err = reconciler.updateGatewayStatusIfChanged(context.Background(), &fresh, "test-ns/test-gw")
+		assert.NoError(t, err)
+
+		// Verify addresses were updated
+		var updated gatewayv1.Gateway
+		err = fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "test-ns", Name: "test-gw"}, &updated)
+		assert.NoError(t, err)
+		assert.Len(t, updated.Status.Addresses, 1)
+		assert.Equal(t, "example.com", updated.Status.Addresses[0].Value)
+	})
+
+	t.Run("nothing changed skips update", func(t *testing.T) {
+		s := newGatewayTestScheme()
+
+		hostnameType := gatewayv1.HostnameAddressType
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gw",
+				Namespace: "test-ns",
+			},
+			Spec: gatewayv1.GatewaySpec{
+				GatewayClassName: "my-class",
+			},
+			Status: gatewayv1.GatewayStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(gatewayv1.GatewayConditionAccepted),
+						Status:             metav1.ConditionTrue,
+						Reason:             "Accepted",
+						Message:            "Gateway accepted by controller",
+						LastTransitionTime: metav1.Now(),
+					},
+					{
+						Type:               string(gatewayv1.GatewayConditionProgrammed),
+						Status:             metav1.ConditionTrue,
+						Reason:             "Programmed",
+						Message:            "Gateway programmed successfully",
+						LastTransitionTime: metav1.Now(),
+					},
+				},
+				Addresses: []gatewayv1.GatewayStatusAddress{
+					{
+						Type:  &hostnameType,
+						Value: "example.com",
+					},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(k8sGw).
+			WithStatusSubresource(&gatewayv1.Gateway{}).
+			Build()
+
+		mockManager := &mockSSHTunnelManager{
+			assignedAddrs: map[string][]string{
+				"example.com:80": {"http://example.com"},
+			},
+			connected: true,
+		}
+
+		reconciler := &GatewayReconciler{
+			Client:  fakeClient,
+			Scheme:  s,
+			manager: mockManager,
+			gateways: map[string]*gateway{
+				"test-ns/test-gw": {
+					listeners: map[string]*Listener{
+						"http": {
+							Hostname: "example.com",
+							Port:     80,
+						},
+					},
+				},
+			},
+		}
+
+		// Fetch fresh so resourceVersion is correct
+		var fresh gatewayv1.Gateway
+		err := fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "test-ns", Name: "test-gw"}, &fresh)
+		assert.NoError(t, err)
+
+		// This should succeed without error; conditions and addresses unchanged
+		err = reconciler.updateGatewayStatusIfChanged(context.Background(), &fresh, "test-ns/test-gw")
+		assert.NoError(t, err)
 	})
 }
