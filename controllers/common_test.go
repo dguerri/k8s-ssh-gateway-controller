@@ -390,6 +390,21 @@ func TestExtractHostnameFromURI(t *testing.T) {
 			uri:      "example.com:8080",
 			expected: "example.com:8080",
 		},
+		{
+			name:     "URL parse failure returns original string",
+			uri:      "://bad",
+			expected: "://bad",
+		},
+		{
+			name:     "other scheme with Host returns Host",
+			uri:      "ftp://example.com/path",
+			expected: "example.com",
+		},
+		{
+			name:     "empty string fallback",
+			uri:      "",
+			expected: "",
+		},
 	}
 
 	for _, tt := range tests {
