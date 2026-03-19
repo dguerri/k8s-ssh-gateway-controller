@@ -6,9 +6,6 @@
 [![CI](https://github.com/dguerri/k8s-ssh-gateway-controller/actions/workflows/ci.yml/badge.svg)](https://github.com/dguerri/k8s-ssh-gateway-controller/actions/workflows/ci.yml)
 [![Coverage Status](https://coveralls.io/repos/github/dguerri/k8s-ssh-gateway-controller/badge.svg?branch=main)](https://coveralls.io/github/dguerri/k8s-ssh-gateway-controller?branch=main)
 
-## Disclaimer
-
-This should be considered alpha quality and not ready for production use.
 
 ## Overview
 
