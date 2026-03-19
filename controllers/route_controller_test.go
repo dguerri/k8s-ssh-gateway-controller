@@ -1129,4 +1129,3 @@ func TestMockGatewayReconciler_RemoveRouteReturnsError(t *testing.T) {
 	assert.Equal(t, "remove route failed", err.Error())
 	assert.Equal(t, 1, mock.removeRouteCalls)
 }
-
