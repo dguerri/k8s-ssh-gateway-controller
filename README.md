@@ -1,6 +1,6 @@
 # Kubernetes Gateway API Controller for SSH Tunneling
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/dguerri/ssh-gateway-api-controller)](https://goreportcard.com/report/github.com/dguerri/ssh-gateway-api-controller)
+[![Go Report Card](https://goreportcard.com/badge/github.com/dguerri/k8s-ssh-gateway-controller)](https://goreportcard.com/report/github.com/dguerri/k8s-ssh-gateway-controller)
 [![Conventional Commits](https://img.shields.io/badge/Conventional%20Commits-1.0.0-yellow.svg)](https://conventionalcommits.org)
 [![License](https://img.shields.io/github/license/dguerri/k8s-ssh-gateway-controller)](LICENSE)
 [![codecov](https://codecov.io/gh/dguerri/k8s-ssh-gateway-controller/branch/main/graph/badge.svg)](https://codecov.io/gh/dguerri/k8s-ssh-gateway-controller)
