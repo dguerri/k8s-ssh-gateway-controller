@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	sshmgr "github.com/dguerri/ssh-gateway-api-controller/ssh"
+	sshmgr "github.com/dguerri/k8s-ssh-gateway-controller/ssh"
 )
 
 // TestUpdateGatewayAddresses_HTTPAddresses tests address extraction for HTTP/HTTPS URIs

@@ -1,4 +1,4 @@
-module github.com/dguerri/ssh-gateway-api-controller
+module github.com/dguerri/k8s-ssh-gateway-controller
 
 go 1.25.0
 

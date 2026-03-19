@@ -19,7 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	sshmgr "github.com/dguerri/ssh-gateway-api-controller/ssh"
+	sshmgr "github.com/dguerri/k8s-ssh-gateway-controller/ssh"
 )
 
 // Get the controller name from environment variable or use a default

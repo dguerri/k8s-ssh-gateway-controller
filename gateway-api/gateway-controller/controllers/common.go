@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	sshmgr "github.com/dguerri/ssh-gateway-api-controller/ssh"
+	sshmgr "github.com/dguerri/k8s-ssh-gateway-controller/ssh"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
