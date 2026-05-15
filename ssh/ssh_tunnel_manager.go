@@ -457,6 +457,30 @@ func (m *SSHTunnelManager) sendForwarding(fwd *ForwardingConfig, req ForwardRequ
 		}
 	}
 
+	// For ForwardStart with address collection enabled, register the notification
+	// channel BEFORE sending the SSH request. The server can emit the assigned URI
+	// on stdout concurrently with (or even before) returning the request response;
+	// if we registered after sendForwardingOnce, notifyURIWaiters would have no
+	// channel to send to and the URI would be dropped, leading to an empty
+	// assignedAddrs while m.forwardings[key] is populated — a state that produces
+	// an infinite "forwarding already exists, adopting it" reconcile loop.
+	var notifCh chan []string
+	var key string
+	if req == ForwardStart && m.remoteAddrFunc != nil {
+		key = forwardingKey(fwd.RemoteHost, fwd.RemotePort)
+		notifCh = make(chan []string, addrNotificationChannelSize)
+		m.addrNotifMu.Lock()
+		m.addrNotifications[key] = notifCh
+		m.addrNotifMu.Unlock()
+
+		defer func() {
+			m.addrNotifMu.Lock()
+			delete(m.addrNotifications, key)
+			m.addrNotifMu.Unlock()
+			close(notifCh)
+		}()
+	}
+
 	// Send the request once
 	err := m.sendForwardingOnce(fwd, req)
 	if err != nil {
@@ -469,22 +493,7 @@ func (m *SSHTunnelManager) sendForwarding(fwd *ForwardingConfig, req ForwardRequ
 	}
 
 	// For ForwardStart, collect assigned addresses (if remoteAddrFunc is available)
-	if m.remoteAddrFunc != nil {
-		key := forwardingKey(fwd.RemoteHost, fwd.RemotePort)
-
-		// Register for address notifications
-		notifCh := make(chan []string, addrNotificationChannelSize)
-		m.addrNotifMu.Lock()
-		m.addrNotifications[key] = notifCh
-		m.addrNotifMu.Unlock()
-
-		defer func() {
-			m.addrNotifMu.Lock()
-			delete(m.addrNotifications, key)
-			m.addrNotifMu.Unlock()
-			close(notifCh)
-		}()
-
+	if notifCh != nil {
 		// Wait for address assignment with timeout
 		verifyCtx, verifyCancel := context.WithTimeout(m.externalCtx, m.addressVerificationTimeout)
 		defer verifyCancel()

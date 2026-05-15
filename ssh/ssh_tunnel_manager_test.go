@@ -1371,3 +1371,83 @@ func TestAuthenticationMethods(t *testing.T) {
 
 	t.Logf("Successfully verified SSH config has %d auth methods (publickey + keyboard-interactive)", len(capturedConfig.Auth))
 }
+
+// TestSendForwardingURIRaceCondition is a regression test for an infinite
+// reconcile loop caused by losing the SSH server's URI notification.
+//
+// The SSH server can emit the assigned forwarding URI on its stdout
+// concurrently with returning the tcpip-forward response. If the notification
+// channel is registered AFTER sendForwardingOnce returns, the URI can arrive
+// while no channel is registered and be silently dropped. The forwarding then
+// ends up with m.forwardings[key] populated but m.assignedAddrs[key] empty,
+// causing the gateway controller's isForwardingValid to keep returning false
+// and StartForwarding to keep returning ErrSSHForwardingExists in a loop.
+//
+// This test simulates the race by emitting the URI from inside
+// sendRequestFunc (i.e., during the SSH server response) and verifies that
+// the URI is still captured in assignedAddrs.
+func TestSendForwardingURIRaceCondition(t *testing.T) {
+	SetupTest(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	remoteAddrFunc := func(data string) ([]string, error) {
+		return []string{"tcp://nue.tuns.sh:27202"}, nil
+	}
+
+	var currentManager *SSHTunnelManager
+	sshDial = func(network, addr string, cfg *ssh.ClientConfig) (sshClient, error) {
+		client := &fakeClient{
+			sendRequestFunc: func(name string, wantReply bool, payload []byte) (bool, []byte, error) {
+				if name == "tcpip-forward" && currentManager != nil {
+					// Emit URI BEFORE returning the SSH response — this is the
+					// race window where the old code would drop the URI.
+					currentManager.processServerData([]byte("tcp://nue.tuns.sh:27202\n"), "stdout")
+				}
+				return true, nil, nil
+			},
+		}
+		return client, nil
+	}
+
+	sshConfig := SSHConnectionConfig{
+		PrivateKey:                 GenerateTestPrivateKey(t),
+		ServerAddress:              "example.com:22",
+		Username:                   "testuser",
+		ConnectTimeout:             5 * time.Second,
+		FwdReqTimeout:              2 * time.Second,
+		KeepAliveInterval:          5 * time.Second,
+		RemoteAddrFunc:             remoteAddrFunc,
+		AddressVerificationTimeout: 200 * time.Millisecond,
+	}
+
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+	if err != nil {
+		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+	}
+	currentManager = manager
+
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+
+	fwd := ForwardingConfig{
+		RemoteHost:   "localhost",
+		RemotePort:   27202,
+		InternalHost: "note-manager-svc",
+		InternalPort: 1337,
+	}
+
+	if err := manager.StartForwarding(fwd); err != nil {
+		t.Fatalf("Unexpected error on StartForwarding: %v", err)
+	}
+
+	addrs := manager.GetAssignedAddresses("localhost", 27202)
+	if len(addrs) == 0 {
+		t.Fatal("URI emitted during tcpip-forward response was dropped; assignedAddrs is empty (race condition regressed)")
+	}
+	if addrs[0] != "tcp://nue.tuns.sh:27202" {
+		t.Errorf("Expected captured URI 'tcp://nue.tuns.sh:27202', got: %v", addrs)
+	}
+}
