@@ -492,60 +492,74 @@ func (m *SSHTunnelManager) sendForwarding(fwd *ForwardingConfig, req ForwardRequ
 		return nil
 	}
 
-	// For ForwardStart, collect assigned addresses (if remoteAddrFunc is available)
-	if notifCh != nil {
-		// Wait for address assignment with timeout
-		verifyCtx, verifyCancel := context.WithTimeout(m.externalCtx, m.addressVerificationTimeout)
-		defer verifyCancel()
-
-		needsVerification := fwd.RemoteHost != "" && fwd.RemoteHost != "0.0.0.0" && fwd.RemoteHost != "localhost"
-
-		select {
-		case <-verifyCtx.Done():
-			if needsVerification {
-				// Timeout waiting for address - cancel the forwarding to avoid orphaned forwardings
-				slog.With("function", "sendForwarding").Error("timeout waiting for address verification, canceling forwarding",
-					"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
-				_ = m.sendForwardingOnce(fwd, ForwardCancel)
-				return fmt.Errorf("timeout waiting for address verification for %s", fwd.RemoteHost)
-			}
-			// For wildcard/generic, we might proceed without specific verification if timeout hits,
-			// but usually we expect *some* address.
-			slog.With("function", "sendForwarding").Warn("timeout waiting for address verification",
-				"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
-			return nil
-
-		case uris := <-notifCh:
-			if needsVerification {
-				// Verify hostname matches for specific hostnames
-				if matchesRequestedHost(uris, fwd.RemoteHost, fwd.RemotePort) {
-					slog.With("function", "sendForwarding").Info("verified correct hostname assigned",
-						"remote_host", fwd.RemoteHost, "uris", uris)
-					// Store the assigned addresses
-					m.addrNotifMu.Lock()
-					m.assignedAddrs[key] = uris
-					m.addrNotifMu.Unlock()
-					return nil
-				} else {
-					slog.With("function", "sendForwarding").Warn("wrong hostname assigned",
-						"requested_host", fwd.RemoteHost, "received_uris", uris)
-					// Cancel this forwarding
-					_ = m.sendForwardingOnce(fwd, ForwardCancel)
-					return fmt.Errorf("wrong hostname assigned: %v", uris)
-				}
-			} else {
-				// For wildcard (0.0.0.0), just store whatever address we got
-				slog.With("function", "sendForwarding").Debug("storing assigned addresses for wildcard forwarding",
-					"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort, "uris", uris)
-				m.addrNotifMu.Lock()
-				m.assignedAddrs[key] = uris
-				m.addrNotifMu.Unlock()
-				return nil
-			}
-		}
+	if notifCh == nil {
+		// No remoteAddrFunc provided, assume success
+		return nil
 	}
 
-	// No remoteAddrFunc provided, assume success
+	return m.awaitAssignedAddresses(fwd, key, notifCh)
+}
+
+// awaitAssignedAddresses blocks until the SSH server reports the assigned URIs
+// for a freshly-sent tcpip-forward request, or the verification timeout fires.
+// On success it stores the URIs in m.assignedAddrs. For specific hostnames it
+// verifies the returned URIs match the request and cancels the forwarding on
+// mismatch or timeout.
+// Must be called with a lock on m.clientMu.
+func (m *SSHTunnelManager) awaitAssignedAddresses(fwd *ForwardingConfig, key string, notifCh <-chan []string) error {
+	verifyCtx, verifyCancel := context.WithTimeout(m.externalCtx, m.addressVerificationTimeout)
+	defer verifyCancel()
+
+	needsVerification := fwd.RemoteHost != "" && fwd.RemoteHost != "0.0.0.0" && fwd.RemoteHost != "localhost"
+
+	select {
+	case <-verifyCtx.Done():
+		return m.handleVerificationTimeout(fwd, needsVerification)
+	case uris := <-notifCh:
+		return m.handleAssignedURIs(fwd, key, uris, needsVerification)
+	}
+}
+
+// handleVerificationTimeout reacts to the address-verification timeout. For
+// hostname-specific requests it cancels the forwarding and returns an error;
+// for wildcard/generic requests it logs and reports success (no specific
+// address was required).
+// Must be called with a lock on m.clientMu.
+func (m *SSHTunnelManager) handleVerificationTimeout(fwd *ForwardingConfig, needsVerification bool) error {
+	if needsVerification {
+		slog.With("function", "sendForwarding").Error("timeout waiting for address verification, canceling forwarding",
+			"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
+		_ = m.sendForwardingOnce(fwd, ForwardCancel)
+		return fmt.Errorf("timeout waiting for address verification for %s", fwd.RemoteHost)
+	}
+	slog.With("function", "sendForwarding").Warn("timeout waiting for address verification",
+		"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
+	return nil
+}
+
+// handleAssignedURIs validates URIs returned by the SSH server. For specific
+// hostnames it cancels the forwarding on hostname mismatch; otherwise it
+// stores the URIs in m.assignedAddrs.
+// Must be called with a lock on m.clientMu.
+func (m *SSHTunnelManager) handleAssignedURIs(fwd *ForwardingConfig, key string, uris []string, needsVerification bool) error {
+	if needsVerification && !matchesRequestedHost(uris, fwd.RemoteHost, fwd.RemotePort) {
+		slog.With("function", "sendForwarding").Warn("wrong hostname assigned",
+			"requested_host", fwd.RemoteHost, "received_uris", uris)
+		_ = m.sendForwardingOnce(fwd, ForwardCancel)
+		return fmt.Errorf("wrong hostname assigned: %v", uris)
+	}
+
+	if needsVerification {
+		slog.With("function", "sendForwarding").Info("verified correct hostname assigned",
+			"remote_host", fwd.RemoteHost, "uris", uris)
+	} else {
+		slog.With("function", "sendForwarding").Debug("storing assigned addresses for wildcard forwarding",
+			"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort, "uris", uris)
+	}
+
+	m.addrNotifMu.Lock()
+	m.assignedAddrs[key] = uris
+	m.addrNotifMu.Unlock()
 	return nil
 }
 
