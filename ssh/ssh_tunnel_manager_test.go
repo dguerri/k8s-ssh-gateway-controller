@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"testing"
 	"time"
 
@@ -1449,5 +1450,96 @@ func TestSendForwardingURIRaceCondition(t *testing.T) {
 	}
 	if addrs[0] != "tcp://nue.tuns.sh:27202" {
 		t.Errorf("Expected captured URI 'tcp://nue.tuns.sh:27202', got: %v", addrs)
+	}
+}
+
+// TestHandleChannelsClosesBothEndsOnOneSidedEOF verifies that when the backend
+// connection EOFs (e.g. the upstream server program exited) handleChannels
+// fully closes both the SSH channel and the backend connection, even if the
+// remote peer has not yet hung up.
+//
+// Regression: previously the goroutines only called CloseWrite, leaving the
+// SSH channel half-closed. The peer goroutine then blocked indefinitely on
+// Read, wg.Wait() never returned, and upstream SSH servers like tuns.sh kept
+// the public-facing TCP connection open until something else broke.
+func TestHandleChannelsClosesBothEndsOnOneSidedEOF(t *testing.T) {
+	SetupTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Backend connection: EOFs on first Read (server program exited / socat
+	// closed the TCP connection).
+	localConn := newTrackingNetConn()
+
+	// Remote SSH channel: blocks on Read until Close is called (peer hasn't
+	// hung up). With the bug this would never unblock; with the fix it
+	// unblocks because the other goroutine fully closes the channel.
+	remoteConn := newBlockingSshChannel()
+
+	newChan := &fakeNewSshChannelWithAccept{
+		channelType: "forwarded-tcpip",
+		extraData: ssh.Marshal(forwardedTCPPayload{
+			Addr: "0.0.0.0",
+			Port: 2222,
+		}),
+		channel: remoteConn,
+	}
+
+	sshConfig := SSHConnectionConfig{
+		PrivateKey:        GenerateTestPrivateKey(t),
+		ServerAddress:     "example.com:22",
+		Username:          "testuser",
+		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
+		KeepAliveInterval: 5 * time.Second,
+		SSHDialFunc: func(network, addr string, cfg *ssh.ClientConfig) (sshClient, error) {
+			return &fakeClient{customNewChannel: newChan}, nil
+		},
+		NetDialFunc: func(network, address string) (net.Conn, error) {
+			return localConn, nil
+		},
+	}
+
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+	if err != nil {
+		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+	}
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+
+	// Register the forwarding so handleChannels accepts the inbound channel.
+	if err := manager.StartForwarding(ForwardingConfig{
+		RemoteHost:   "0.0.0.0",
+		RemotePort:   2222,
+		InternalHost: "localhost",
+		InternalPort: 8080,
+	}); err != nil {
+		t.Fatalf("Failed to start forwarding: %v", err)
+	}
+
+	// With the fix both connections must be fully closed shortly after the
+	// backend EOFs. 2s is generous — the fix should close in microseconds.
+	timeout := 2 * time.Second
+
+	select {
+	case <-localConn.closed:
+	case <-time.After(timeout):
+		t.Fatalf("local connection was not closed within %s (Close calls: %d)",
+			timeout, localConn.closeCalls.Load())
+	}
+
+	select {
+	case <-remoteConn.closed:
+	case <-time.After(timeout):
+		t.Fatalf("remote SSH channel was not fully closed within %s (Close: %d, CloseWrite: %d)",
+			timeout, remoteConn.closeCalls.Load(), remoteConn.closeWriteCalls.Load())
+	}
+
+	if got := remoteConn.closeCalls.Load(); got == 0 {
+		t.Errorf("expected remote SSH channel Close() to be called, got 0 calls")
+	}
+	if got := localConn.closeCalls.Load(); got == 0 {
+		t.Errorf("expected local connection Close() to be called, got 0 calls")
 	}
 }

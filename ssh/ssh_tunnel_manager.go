@@ -738,6 +738,12 @@ func (m *SSHTunnelManager) handleChannels() {
 								_ = localConn.Close() // #nosec G104 -- Cleanup in defer, error logged below
 							}()
 
+							// When either Copy direction finishes, fully close both
+							// connections so the peer goroutine's blocking Read returns and
+							// the SSH channel is torn down (not just half-closed). With only
+							// CloseWrite, an upstream SSH server like tuns.sh keeps the
+							// public-facing TCP connection open until the channel itself
+							// closes, which never happens if a client doesn't hang up first.
 							wg := &sync.WaitGroup{}
 							wg.Add(2)
 
@@ -745,16 +751,16 @@ func (m *SSHTunnelManager) handleChannels() {
 								defer wg.Done()
 								n, err := io.Copy(remoteConn, localConn)
 								slog.With("function", "handleChannels").Debug("copied data from local to remote", "bytes", n, "error", err)
-								_ = remoteConn.CloseWrite() // #nosec G104 -- Best effort shutdown, error logged in io.Copy above
+								_ = remoteConn.Close() // #nosec G104 -- Best effort close
+								_ = localConn.Close()  // #nosec G104 -- Best effort close
 							}()
 
 							go func() {
 								defer wg.Done()
 								n, err := io.Copy(localConn, remoteConn)
 								slog.With("function", "handleChannels").Debug("copied data from remote to local", "bytes", n, "error", err)
-								if cw, ok := localConn.(interface{ CloseWrite() error }); ok {
-									_ = cw.CloseWrite() // #nosec G104 -- Best effort shutdown, error logged in io.Copy above
-								}
+								_ = localConn.Close()  // #nosec G104 -- Best effort close
+								_ = remoteConn.Close() // #nosec G104 -- Best effort close
 							}()
 
 							wg.Wait()

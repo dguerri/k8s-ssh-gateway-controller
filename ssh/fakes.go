@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -67,6 +68,10 @@ type fakeClient struct {
 	// sendRequestFunc allows tests to customize the behavior of SendRequest.
 	// If nil, SendRequest returns success by default.
 	sendRequestFunc func(name string, wantReply bool, payload []byte) (bool, []byte, error)
+
+	// customNewChannel, if set, is the ssh.NewChannel emitted by
+	// HandleChannelOpen instead of the default fakeNewSshChannel.
+	customNewChannel ssh.NewChannel
 }
 
 // Listen listens for incoming connections.
@@ -162,6 +167,10 @@ func (f *fakeClient) HandleChannelOpen(channelType string) <-chan ssh.NewChannel
 	ch := make(chan ssh.NewChannel, 1) // Buffered channel for one message
 	go func() {
 		defer close(ch) // Close the channel when done
+		if f.customNewChannel != nil {
+			ch <- f.customNewChannel
+			return
+		}
 		ch <- &fakeNewSshChannel{channelType: channelType, extraData: ssh.Marshal(forwardedTCPPayload{
 			Addr: "0.0.0.0",
 			Port: 2222,
@@ -203,3 +212,109 @@ func (l *fakeListener) Close() error { return nil }
 
 // Addr returns the listener's address.
 func (l *fakeListener) Addr() net.Addr { return &fakeAddr{} }
+
+// blockingSshChannel is an ssh.Channel whose Read blocks until Close is called.
+// It is used to simulate a peer that has not yet hung up (e.g. an SSH server
+// holding a public-facing TCP connection open while waiting for the client to
+// FIN). It also counts Close and CloseWrite invocations so tests can assert
+// that the channel was fully torn down rather than only half-closed.
+type blockingSshChannel struct {
+	closed          chan struct{}
+	closeOnce       sync.Once
+	closeCalls      atomic.Int32
+	closeWriteCalls atomic.Int32
+}
+
+func newBlockingSshChannel() *blockingSshChannel {
+	return &blockingSshChannel{closed: make(chan struct{})}
+}
+
+func (b *blockingSshChannel) Read(p []byte) (int, error) {
+	<-b.closed
+	return 0, io.EOF
+}
+
+func (b *blockingSshChannel) Write(p []byte) (int, error) {
+	select {
+	case <-b.closed:
+		return 0, io.ErrClosedPipe
+	default:
+		return len(p), nil
+	}
+}
+
+func (b *blockingSshChannel) Close() error {
+	b.closeCalls.Add(1)
+	b.closeOnce.Do(func() { close(b.closed) })
+	return nil
+}
+
+func (b *blockingSshChannel) CloseWrite() error {
+	b.closeWriteCalls.Add(1)
+	return nil
+}
+
+func (b *blockingSshChannel) SendRequest(string, bool, []byte) (bool, error) {
+	return true, nil
+}
+
+func (b *blockingSshChannel) Stderr() io.ReadWriter { return &fakeReadWriter{} }
+
+// fakeNewSshChannelWithAccept is a fake ssh.NewChannel whose Accept returns a
+// caller-provided ssh.Channel, letting tests inject custom Read/Write/Close
+// behavior on the channel returned to handleChannels.
+type fakeNewSshChannelWithAccept struct {
+	channelType string
+	extraData   []byte
+	channel     ssh.Channel
+}
+
+func (f *fakeNewSshChannelWithAccept) ChannelType() string { return f.channelType }
+func (f *fakeNewSshChannelWithAccept) ExtraData() []byte   { return f.extraData }
+func (f *fakeNewSshChannelWithAccept) Accept() (ssh.Channel, <-chan *ssh.Request, error) {
+	requests := make(chan *ssh.Request)
+	close(requests)
+	return f.channel, requests, nil
+}
+func (f *fakeNewSshChannelWithAccept) Reject(_ ssh.RejectionReason, message string) error {
+	return fmt.Errorf("channel rejected: %s", message)
+}
+
+// trackingNetConn is a net.Conn that EOFs on first Read and records Close
+// calls, exposing a `closed` channel that fires the first time Close is
+// invoked. Used as the "backend" connection in handleChannels tests where the
+// backend has already torn down its TCP socket.
+type trackingNetConn struct {
+	readOnce   sync.Once
+	closeOnce  sync.Once
+	closed     chan struct{}
+	closeCalls atomic.Int32
+}
+
+func newTrackingNetConn() *trackingNetConn {
+	return &trackingNetConn{closed: make(chan struct{})}
+}
+
+func (t *trackingNetConn) Read(p []byte) (int, error) {
+	var err error
+	t.readOnce.Do(func() { err = io.EOF })
+	if err != nil {
+		return 0, err
+	}
+	<-t.closed
+	return 0, io.EOF
+}
+
+func (t *trackingNetConn) Write(p []byte) (int, error) { return len(p), nil }
+
+func (t *trackingNetConn) Close() error {
+	t.closeCalls.Add(1)
+	t.closeOnce.Do(func() { close(t.closed) })
+	return nil
+}
+
+func (t *trackingNetConn) LocalAddr() net.Addr              { return &fakeAddr{} }
+func (t *trackingNetConn) RemoteAddr() net.Addr             { return &fakeAddr{} }
+func (t *trackingNetConn) SetDeadline(time.Time) error      { return nil }
+func (t *trackingNetConn) SetReadDeadline(time.Time) error  { return nil }
+func (t *trackingNetConn) SetWriteDeadline(time.Time) error { return nil }
