@@ -829,6 +829,17 @@ func (m *SSHTunnelManager) connectClient() error {
 	m.connected = true
 	m.connectionCtx, m.connectionCancel = context.WithCancel(m.externalCtx)
 
+	// Diagnostic: log the underlying transport shutdown reason. ssh.Conn.Wait
+	// blocks until the SSH transport loop exits and returns whatever error
+	// caused it — including SSH_MSG_DISCONNECT reason strings from the server,
+	// which are otherwise hidden behind the EOF surfaced to SendRequest.
+	if real, ok := client.(*ssh.Client); ok {
+		go func() {
+			err := real.Wait()
+			slog.With("function", "monitorClientWait").Info("ssh client transport shut down", "error", err)
+		}()
+	}
+
 	// captureReady is closed when the capture session (Shell) is ready to receive
 	// server output. Forwardings wait on this before sending tcpip-forward requests,
 	// ensuring the Shell session is listening when the server outputs addresses.
