@@ -72,6 +72,10 @@ type ForwardingConfig struct {
 	InternalHost string
 	RemotePort   int
 	InternalPort int
+	// EnforcePort, when true, requires the server-assigned TCP URI to use
+	// exactly RemotePort. Used for TCP listeners where the Gateway spec
+	// pins a specific port. Has no effect on HTTP/HTTPS URIs.
+	EnforcePort bool
 }
 
 // SSHTunnelManager manages SSH tunnels and forwardings.
@@ -409,31 +413,64 @@ const (
 	addrNotificationChannelSize = 5
 )
 
-// matchesRequestedHost checks if any of the extracted URIs match the requested hostname.
-// For HTTP/HTTPS URIs, it checks if the hostname contains the requested host.
-// For TCP URIs, it checks if the host:port matches.
-func matchesRequestedHost(uris []string, requestedHost string, requestedPort int) bool {
-	if requestedHost == "" || requestedHost == "0.0.0.0" {
-		// No specific hostname requested, any assignment is fine
-		return true
-	}
+// MatchesRequestedHost checks if any of the extracted URIs match the requested hostname/port.
+// For HTTP/HTTPS URIs: checks if the hostname contains the requested host (wildcard hostnames
+// — "", "0.0.0.0", "localhost" — accept any assignment).
+// For TCP URIs:
+//   - When the hostname is specific, the URI must contain "host:port".
+//   - When the hostname is wildcard and enforcePort is true, the URI port must equal requestedPort.
+//   - When the hostname is wildcard and enforcePort is false, any TCP URI matches.
+func MatchesRequestedHost(uris []string, requestedHost string, requestedPort int, enforcePort bool) bool {
+	hostnameWildcard := requestedHost == "" || requestedHost == "0.0.0.0" || requestedHost == "localhost"
 
 	for _, uri := range uris {
-		// For HTTP/HTTPS: check if hostname contains requested host
-		// e.g., requested "dev", got "https://user-dev.tuns.sh" -> match
+		// HTTP/HTTPS: hostname-only check.
 		if strings.HasPrefix(uri, "http://") || strings.HasPrefix(uri, "https://") {
+			if hostnameWildcard {
+				return true
+			}
 			if strings.Contains(uri, requestedHost) {
 				return true
 			}
+			continue
 		}
-		// For TCP: check if it contains host:port
-		// e.g., requested "example.com", got "tcp://example.com:8080" -> match
-		expectedTCP := fmt.Sprintf("%s:%d", requestedHost, requestedPort)
-		if strings.Contains(uri, expectedTCP) {
-			return true
+
+		// TCP: port enforcement (always for specific hostnames; opt-in via
+		// enforcePort for wildcard hostnames).
+		if strings.HasPrefix(uri, "tcp://") {
+			if !hostnameWildcard {
+				// e.g., requested "example.com:8080", URI "tcp://example.com:8080" -> match.
+				expectedTCP := fmt.Sprintf("%s:%d", requestedHost, requestedPort)
+				if strings.Contains(uri, expectedTCP) {
+					return true
+				}
+				continue
+			}
+			if !enforcePort {
+				return true
+			}
+			uriPort, ok := tcpURIPort(uri)
+			if ok && uriPort == requestedPort {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// tcpURIPort extracts the port from a "tcp://host:port" URI. Returns (0, false)
+// if the URI cannot be parsed or has no port.
+func tcpURIPort(uri string) (int, bool) {
+	hostPort := strings.TrimPrefix(uri, "tcp://")
+	_, portStr, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		return 0, false
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return 0, false
+	}
+	return port, true
 }
 
 // sendForwarding sends a request to the SSH server to start or cancel a TCP forwarding.
@@ -510,7 +547,8 @@ func (m *SSHTunnelManager) awaitAssignedAddresses(fwd *ForwardingConfig, key str
 	verifyCtx, verifyCancel := context.WithTimeout(m.externalCtx, m.addressVerificationTimeout)
 	defer verifyCancel()
 
-	needsVerification := fwd.RemoteHost != "" && fwd.RemoteHost != "0.0.0.0" && fwd.RemoteHost != "localhost"
+	hostnameSpecific := fwd.RemoteHost != "" && fwd.RemoteHost != "0.0.0.0" && fwd.RemoteHost != "localhost"
+	needsVerification := hostnameSpecific || fwd.EnforcePort
 
 	select {
 	case <-verifyCtx.Done():
@@ -542,7 +580,7 @@ func (m *SSHTunnelManager) handleVerificationTimeout(fwd *ForwardingConfig, need
 // stores the URIs in m.assignedAddrs.
 // Must be called with a lock on m.clientMu.
 func (m *SSHTunnelManager) handleAssignedURIs(fwd *ForwardingConfig, key string, uris []string, needsVerification bool) error {
-	if needsVerification && !matchesRequestedHost(uris, fwd.RemoteHost, fwd.RemotePort) {
+	if needsVerification && !MatchesRequestedHost(uris, fwd.RemoteHost, fwd.RemotePort, fwd.EnforcePort) {
 		slog.With("function", "sendForwarding").Warn("wrong hostname assigned",
 			"requested_host", fwd.RemoteHost, "received_uris", uris)
 		_ = m.sendForwardingOnce(fwd, ForwardCancel)

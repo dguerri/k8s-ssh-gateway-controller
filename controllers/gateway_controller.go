@@ -111,26 +111,24 @@ func isRouteAlreadyAttached(l *Listener, routeName, routeNamespace, backendHost 
 
 // isForwardingValid checks if a forwarding exists in SSH manager and matches expectations.
 // For hostname-based forwardings: verifies assigned URIs contain the requested hostname.
-// For wildcard (0.0.0.0, localhost, or no address): accepts any assigned address.
-// Returns false if no addresses assigned or hostname mismatch.
+// For TCP listeners pinning a specific port: verifies the assigned TCP URI's port
+// matches l.Port (regardless of hostname).
+// For wildcard (0.0.0.0, localhost) without TCP port pinning: accepts any assigned address.
+// Returns false if no addresses assigned or a mismatch is detected.
 func (r *GatewayReconciler) isForwardingValid(l *Listener) bool {
 	addrs := r.manager.GetAssignedAddresses(l.Hostname, l.Port)
 	if len(addrs) == 0 {
 		return false // No forwarding exists in SSH manager
 	}
 
-	// For wildcard hostnames (0.0.0.0, localhost), accept any assigned address
-	if l.Hostname == "0.0.0.0" || l.Hostname == "localhost" {
+	enforcePort := l.Protocol == "TCP" && l.Port > 0
+	hostnameWildcard := l.Hostname == "0.0.0.0" || l.Hostname == "localhost"
+
+	if hostnameWildcard && !enforcePort {
 		return true
 	}
 
-	// For specific hostnames, verify hostname matches
-	for _, addr := range addrs {
-		if strings.Contains(addr, l.Hostname) {
-			return true // Found matching hostname in URIs
-		}
-	}
-	return false // Hostname mismatch (wrong subdomain assigned)
+	return sshmgr.MatchesRequestedHost(addrs, l.Hostname, l.Port, enforcePort)
 }
 
 // setupRouteForwarding handles the actual forwarding setup for a route.
@@ -170,12 +168,15 @@ func (r *GatewayReconciler) setupRouteForwarding(l *Listener, gwKey, routeName, 
 		return &ErrGatewayNotReady{msg: "SSH client not connected"}
 	}
 
-	// Start forwarding
+	// Start forwarding. For TCP listeners pinning a specific port, require the
+	// server to honor that port — otherwise we'd silently accept whatever port
+	// the SSH server assigns and route traffic to the wrong listener.
 	err := r.manager.StartForwarding(sshmgr.ForwardingConfig{
 		RemoteHost:   l.Hostname,
 		RemotePort:   l.Port,
 		InternalHost: route.Host,
 		InternalPort: route.Port,
+		EnforcePort:  l.Protocol == "TCP" && l.Port > 0,
 	})
 	if err != nil {
 		return r.handleForwardingError(err, l, &route, gwKey, routeName, routeNamespace, listenerName)

@@ -406,6 +406,7 @@ func TestMatchesRequestedHost(t *testing.T) {
 		requestedHost string
 		uris          []string
 		requestedPort int
+		enforcePort   bool
 		expected      bool
 	}{
 		{
@@ -458,20 +459,68 @@ func TestMatchesRequestedHost(t *testing.T) {
 			expected:      true,
 		},
 		{
-			name:          "TCP URI with wrong port",
+			name:          "TCP URI with wrong port (specific hostname)",
 			uris:          []string{"tcp://example.com:9090"},
 			requestedHost: "example.com",
 			requestedPort: 8080,
 			expected:      false,
 		},
+		{
+			name:          "TCP URI with wildcard hostname, enforcePort, correct port",
+			uris:          []string{"tcp://nue.tuns.sh:27101"},
+			requestedHost: "localhost",
+			requestedPort: 27101,
+			enforcePort:   true,
+			expected:      true,
+		},
+		{
+			name:          "TCP URI with wildcard hostname, enforcePort, wrong port",
+			uris:          []string{"tcp://nue.tuns.sh:31879"},
+			requestedHost: "localhost",
+			requestedPort: 27101,
+			enforcePort:   true,
+			expected:      false,
+		},
+		{
+			name:          "TCP URI with wildcard hostname, no enforcePort, wrong port",
+			uris:          []string{"tcp://nue.tuns.sh:31879"},
+			requestedHost: "localhost",
+			requestedPort: 27101,
+			enforcePort:   false,
+			expected:      true,
+		},
+		{
+			name:          "TCP URI with 0.0.0.0 hostname, enforcePort, correct port",
+			uris:          []string{"tcp://nue.tuns.sh:27101"},
+			requestedHost: "0.0.0.0",
+			requestedPort: 27101,
+			enforcePort:   true,
+			expected:      true,
+		},
+		{
+			name:          "TCP URI with 0.0.0.0 hostname, enforcePort, wrong port",
+			uris:          []string{"tcp://nue.tuns.sh:31879"},
+			requestedHost: "0.0.0.0",
+			requestedPort: 27101,
+			enforcePort:   true,
+			expected:      false,
+		},
+		{
+			name:          "HTTPS URI ignores enforcePort",
+			uris:          []string{"https://random.tuns.sh"},
+			requestedHost: "localhost",
+			requestedPort: 80,
+			enforcePort:   true,
+			expected:      true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := matchesRequestedHost(tt.uris, tt.requestedHost, tt.requestedPort)
+			result := MatchesRequestedHost(tt.uris, tt.requestedHost, tt.requestedPort, tt.enforcePort)
 			if result != tt.expected {
-				t.Errorf("matchesRequestedHost(%v, %q, %d) = %v, want %v",
-					tt.uris, tt.requestedHost, tt.requestedPort, result, tt.expected)
+				t.Errorf("MatchesRequestedHost(%v, %q, %d, %v) = %v, want %v",
+					tt.uris, tt.requestedHost, tt.requestedPort, tt.enforcePort, result, tt.expected)
 			}
 		})
 	}

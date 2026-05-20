@@ -473,6 +473,42 @@ func TestIsForwardingValid(t *testing.T) {
 			},
 			expected: true, // Contains "api.example.com"
 		},
+		{
+			name: "TCP listener with localhost and matching port",
+			listener: &Listener{
+				Hostname: "localhost",
+				Protocol: "TCP",
+				Port:     27101,
+			},
+			assignedAddrs: map[string][]string{
+				"localhost:27101": {"tcp://nue.tuns.sh:27101"},
+			},
+			expected: true,
+		},
+		{
+			name: "TCP listener with localhost and mismatched port",
+			listener: &Listener{
+				Hostname: "localhost",
+				Protocol: "TCP",
+				Port:     27101,
+			},
+			assignedAddrs: map[string][]string{
+				"localhost:27101": {"tcp://nue.tuns.sh:31879"},
+			},
+			expected: false,
+		},
+		{
+			name: "TCP listener with 0.0.0.0 and mismatched port",
+			listener: &Listener{
+				Hostname: "0.0.0.0",
+				Protocol: "TCP",
+				Port:     27101,
+			},
+			assignedAddrs: map[string][]string{
+				"0.0.0.0:27101": {"tcp://nue.tuns.sh:31879"},
+			},
+			expected: false,
+		},
 	}
 
 	for _, tt := range tests {
