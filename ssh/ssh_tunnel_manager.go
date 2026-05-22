@@ -567,7 +567,10 @@ func (m *SSHTunnelManager) handleVerificationTimeout(fwd *ForwardingConfig, need
 	if needsVerification {
 		slog.With("function", "sendForwarding").Error("timeout waiting for address verification, canceling forwarding",
 			"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
-		_ = m.sendForwardingOnce(fwd, ForwardCancel)
+		if cancelErr := m.sendForwardingOnce(fwd, ForwardCancel); cancelErr != nil {
+			slog.With("function", "sendForwarding").Error("failed to cancel forwarding after verification timeout, remote listener may leak",
+				"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort, "error", cancelErr)
+		}
 		return fmt.Errorf("timeout waiting for address verification for %s", fwd.RemoteHost)
 	}
 	slog.With("function", "sendForwarding").Warn("timeout waiting for address verification",
@@ -583,7 +586,10 @@ func (m *SSHTunnelManager) handleAssignedURIs(fwd *ForwardingConfig, key string,
 	if needsVerification && !MatchesRequestedHost(uris, fwd.RemoteHost, fwd.RemotePort, fwd.EnforcePort) {
 		slog.With("function", "sendForwarding").Warn("wrong hostname assigned",
 			"requested_host", fwd.RemoteHost, "received_uris", uris)
-		_ = m.sendForwardingOnce(fwd, ForwardCancel)
+		if cancelErr := m.sendForwardingOnce(fwd, ForwardCancel); cancelErr != nil {
+			slog.With("function", "sendForwarding").Error("failed to cancel forwarding after hostname mismatch, remote listener may leak",
+				"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort, "error", cancelErr)
+		}
 		return fmt.Errorf("wrong hostname assigned: %v", uris)
 	}
 
