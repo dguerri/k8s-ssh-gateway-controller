@@ -201,7 +201,7 @@ func aggregateGatewayProgrammed(listenerConds []metav1.Condition) metav1.Conditi
 	return metav1.Condition{
 		Type:               string(gatewayv1.GatewayConditionProgrammed),
 		Status:             metav1.ConditionFalse,
-		Reason:             string(gatewayv1.GatewayReasonListenersNotValid),
+		Reason:             string(gatewayv1.GatewayReasonInvalid),
 		Message:            fmt.Sprintf("%d listener(s) not programmed", failed),
 		LastTransitionTime: metav1.Now(),
 	}

@@ -2422,7 +2422,7 @@ func TestGatewayProgrammedCondition_OneListenerFailed(t *testing.T) {
 	}
 	cond := aggregateGatewayProgrammed(listenerConds)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
-	assert.Equal(t, string(gatewayv1.GatewayReasonListenersNotValid), cond.Reason)
+	assert.Equal(t, string(gatewayv1.GatewayReasonInvalid), cond.Reason)
 	assert.Contains(t, cond.Message, "1 listener")
 }
 
