@@ -2399,3 +2399,35 @@ func TestListenerProgrammedCondition_RouteAttachedForwardingInvalid(t *testing.T
 	assert.Equal(t, string(gatewayv1.ListenerReasonInvalid), cond.Reason)
 	assert.Contains(t, cond.Message, "hostname")
 }
+
+func TestGatewayProgrammedCondition_AllListenersProgrammed(t *testing.T) {
+	listenerConds := []metav1.Condition{
+		{Type: string(gatewayv1.ListenerConditionProgrammed), Status: metav1.ConditionTrue,
+			Reason: string(gatewayv1.ListenerReasonProgrammed)},
+		{Type: string(gatewayv1.ListenerConditionProgrammed), Status: metav1.ConditionTrue,
+			Reason: string(gatewayv1.ListenerReasonProgrammed)},
+	}
+	cond := aggregateGatewayProgrammed(listenerConds)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, string(gatewayv1.GatewayReasonProgrammed), cond.Reason)
+}
+
+func TestGatewayProgrammedCondition_OneListenerFailed(t *testing.T) {
+	listenerConds := []metav1.Condition{
+		{Type: string(gatewayv1.ListenerConditionProgrammed), Status: metav1.ConditionTrue,
+			Reason: string(gatewayv1.ListenerReasonProgrammed)},
+		{Type: string(gatewayv1.ListenerConditionProgrammed), Status: metav1.ConditionFalse,
+			Reason:  string(gatewayv1.ListenerReasonInvalid),
+			Message: "SSH server did not honor requested hostname/port example.com:80"},
+	}
+	cond := aggregateGatewayProgrammed(listenerConds)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, string(gatewayv1.GatewayReasonListenersNotValid), cond.Reason)
+	assert.Contains(t, cond.Message, "1 listener")
+}
+
+func TestGatewayProgrammedCondition_NoListeners(t *testing.T) {
+	cond := aggregateGatewayProgrammed(nil)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, string(gatewayv1.GatewayReasonProgrammed), cond.Reason)
+}

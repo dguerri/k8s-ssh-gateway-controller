@@ -175,6 +175,38 @@ func (r *GatewayReconciler) listenerProgrammedCondition(l *Listener) metav1.Cond
 	return base
 }
 
+// aggregateGatewayProgrammed computes the Gateway-level Programmed condition
+// from a slice of per-listener Programmed conditions. Pure function — no
+// receiver needed.
+//
+// Rule: Gateway.Programmed=True iff every listener has Programmed=True.
+// Otherwise Programmed=False with Reason=ListenersNotValid and a message
+// summarizing how many listeners failed.
+func aggregateGatewayProgrammed(listenerConds []metav1.Condition) metav1.Condition {
+	failed := 0
+	for _, c := range listenerConds {
+		if c.Status != metav1.ConditionTrue {
+			failed++
+		}
+	}
+	if failed == 0 {
+		return metav1.Condition{
+			Type:               string(gatewayv1.GatewayConditionProgrammed),
+			Status:             metav1.ConditionTrue,
+			Reason:             string(gatewayv1.GatewayReasonProgrammed),
+			Message:            "all listeners programmed",
+			LastTransitionTime: metav1.Now(),
+		}
+	}
+	return metav1.Condition{
+		Type:               string(gatewayv1.GatewayConditionProgrammed),
+		Status:             metav1.ConditionFalse,
+		Reason:             string(gatewayv1.GatewayReasonListenersNotValid),
+		Message:            fmt.Sprintf("%d listener(s) not programmed", failed),
+		LastTransitionTime: metav1.Now(),
+	}
+}
+
 // setupRouteForwarding handles the actual forwarding setup for a route.
 // This includes stopping any existing forwarding and starting the new one.
 func (r *GatewayReconciler) setupRouteForwarding(l *Listener, gwKey, routeName, routeNamespace, backendHost string, backendPort int, listenerName string) error {
