@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -2430,4 +2431,56 @@ func TestGatewayProgrammedCondition_NoListeners(t *testing.T) {
 	cond := aggregateGatewayProgrammed(nil)
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
 	assert.Equal(t, string(gatewayv1.GatewayReasonProgrammed), cond.Reason)
+}
+
+func TestBuildListenerStatuses_MixedListenerStates(t *testing.T) {
+	mgr := &mockSSHTunnelManager{
+		connected: true,
+		assignedAddrs: map[string][]string{
+			forwardingKey("good.example.com", 80): {"http://good.example.com"},
+			forwardingKey("bad.example.com", 80):  {"http://fallback-xyz.tuns.sh"},
+		},
+	}
+	r := &GatewayReconciler{manager: mgr, gateways: map[string]*gateway{}}
+	gwKey := "ns/gw"
+	r.gateways[gwKey] = &gateway{
+		listeners: map[string]*Listener{
+			"good": {Protocol: "HTTP", Hostname: "good.example.com", Port: 80,
+				route: &Route{Name: "r1", Namespace: "ns", Host: "svc", Port: 8080}},
+			"bad": {Protocol: "HTTP", Hostname: "bad.example.com", Port: 80,
+				route: &Route{Name: "r2", Namespace: "ns", Host: "svc", Port: 8080}},
+			"idle": {Protocol: "HTTP", Hostname: "idle.example.com", Port: 80},
+		},
+	}
+
+	statuses := r.buildListenerStatuses("ns", "gw")
+
+	require.Len(t, statuses, 3)
+	byName := map[string]gatewayv1.ListenerStatus{}
+	for _, s := range statuses {
+		byName[string(s.Name)] = s
+	}
+	assertProgrammed := func(t *testing.T, ls gatewayv1.ListenerStatus, want metav1.ConditionStatus) {
+		t.Helper()
+		for _, c := range ls.Conditions {
+			if c.Type == string(gatewayv1.ListenerConditionProgrammed) {
+				assert.Equal(t, want, c.Status, "listener %s", ls.Name)
+				return
+			}
+		}
+		t.Fatalf("listener %s missing Programmed condition", ls.Name)
+	}
+	assertProgrammed(t, byName["good"], metav1.ConditionTrue)
+	assertProgrammed(t, byName["bad"], metav1.ConditionFalse)
+	assertProgrammed(t, byName["idle"], metav1.ConditionTrue) // no route -> still programmed
+	assert.EqualValues(t, 1, byName["good"].AttachedRoutes)
+	assert.EqualValues(t, 1, byName["bad"].AttachedRoutes)
+	assert.EqualValues(t, 0, byName["idle"].AttachedRoutes)
+}
+
+func TestBuildListenerStatuses_GatewayNotInRegistry(t *testing.T) {
+	r := &GatewayReconciler{manager: &mockSSHTunnelManager{connected: true},
+		gateways: map[string]*gateway{}}
+	statuses := r.buildListenerStatuses("ns", "missing")
+	assert.Nil(t, statuses)
 }

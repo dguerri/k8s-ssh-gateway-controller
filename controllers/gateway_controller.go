@@ -207,6 +207,38 @@ func aggregateGatewayProgrammed(listenerConds []metav1.Condition) metav1.Conditi
 	}
 }
 
+// buildListenerStatuses constructs the per-listener portion of the Gateway
+// status from the internal listeners map. Returns nil if the Gateway is not
+// in the controller's registry.
+//
+// Acquires gatewaysMu and listenersMu (read) — must NOT be called while
+// either is already held.
+func (r *GatewayReconciler) buildListenerStatuses(gwNamespace, gwName string) []gatewayv1.ListenerStatus {
+	r.gatewaysMu.Lock()
+	defer r.gatewaysMu.Unlock()
+
+	gw, exists := r.gateways[getGwKey(gwNamespace, gwName)]
+	if !exists {
+		return nil
+	}
+	gw.listenersMu.RLock()
+	defer gw.listenersMu.RUnlock()
+
+	statuses := make([]gatewayv1.ListenerStatus, 0, len(gw.listeners))
+	for name, l := range gw.listeners {
+		attached := int32(0)
+		if l.route != nil {
+			attached = 1
+		}
+		statuses = append(statuses, gatewayv1.ListenerStatus{
+			Name:           gatewayv1.SectionName(name),
+			AttachedRoutes: attached,
+			Conditions:     []metav1.Condition{r.listenerProgrammedCondition(l)},
+		})
+	}
+	return statuses
+}
+
 // setupRouteForwarding handles the actual forwarding setup for a route.
 // This includes stopping any existing forwarding and starting the new one.
 func (r *GatewayReconciler) setupRouteForwarding(l *Listener, gwKey, routeName, routeNamespace, backendHost string, backendPort int, listenerName string) error {
