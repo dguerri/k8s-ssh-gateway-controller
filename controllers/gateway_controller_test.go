@@ -2338,3 +2338,64 @@ func TestGatewayClassReconciler_Reconcile_StatusUpdateFails(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to update GatewayClass status")
 	assert.Equal(t, ctrl.Result{}, result)
 }
+
+func TestListenerProgrammedCondition_NoRouteAttached_SSHConnected(t *testing.T) {
+	mgr := &mockSSHTunnelManager{connected: true}
+	r := &GatewayReconciler{manager: mgr}
+	l := &Listener{Protocol: "HTTP", Hostname: "example.com", Port: 80}
+
+	cond := r.listenerProgrammedCondition(l)
+
+	assert.Equal(t, string(gatewayv1.ListenerConditionProgrammed), cond.Type)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, string(gatewayv1.ListenerReasonProgrammed), cond.Reason)
+}
+
+func TestListenerProgrammedCondition_SSHDisconnected(t *testing.T) {
+	mgr := &mockSSHTunnelManager{connected: false}
+	r := &GatewayReconciler{manager: mgr}
+	l := &Listener{Protocol: "HTTP", Hostname: "example.com", Port: 80,
+		route: &Route{Name: "r", Namespace: "ns", Host: "svc", Port: 8080}}
+
+	cond := r.listenerProgrammedCondition(l)
+
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, string(gatewayv1.ListenerReasonPending), cond.Reason)
+	assert.Contains(t, cond.Message, "SSH")
+}
+
+func TestListenerProgrammedCondition_RouteAttachedForwardingValid(t *testing.T) {
+	mgr := &mockSSHTunnelManager{
+		connected: true,
+		assignedAddrs: map[string][]string{
+			forwardingKey("example.com", 80): {"http://example.com"},
+		},
+	}
+	r := &GatewayReconciler{manager: mgr}
+	l := &Listener{Protocol: "HTTP", Hostname: "example.com", Port: 80,
+		route: &Route{Name: "r", Namespace: "ns", Host: "svc", Port: 8080}}
+
+	cond := r.listenerProgrammedCondition(l)
+
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, string(gatewayv1.ListenerReasonProgrammed), cond.Reason)
+}
+
+func TestListenerProgrammedCondition_RouteAttachedForwardingInvalid(t *testing.T) {
+	// SSH server assigned a different hostname than requested — the production bug.
+	mgr := &mockSSHTunnelManager{
+		connected: true,
+		assignedAddrs: map[string][]string{
+			forwardingKey("per-la-categoria.guerri.me", 80): {"http://dguerri-zsi.nue.tuns.sh"},
+		},
+	}
+	r := &GatewayReconciler{manager: mgr}
+	l := &Listener{Protocol: "HTTP", Hostname: "per-la-categoria.guerri.me", Port: 80,
+		route: &Route{Name: "r", Namespace: "ns", Host: "svc", Port: 8080}}
+
+	cond := r.listenerProgrammedCondition(l)
+
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, string(gatewayv1.ListenerReasonInvalid), cond.Reason)
+	assert.Contains(t, cond.Message, "hostname")
+}

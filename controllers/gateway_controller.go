@@ -131,6 +131,50 @@ func (r *GatewayReconciler) isForwardingValid(l *Listener) bool {
 	return sshmgr.MatchesRequestedHost(addrs, l.Hostname, l.Port, enforcePort)
 }
 
+// listenerProgrammedCondition computes the Programmed condition for a single
+// listener. Caller must already hold listenersMu (read or write).
+//
+// Semantics:
+//   - SSH manager disconnected -> Programmed=False, Reason=Pending.
+//   - No route attached yet     -> Programmed=True,  Reason=Programmed
+//     (controller is ready; absence of routes is not a programming failure).
+//   - Route attached and forwarding valid  -> Programmed=True,  Reason=Programmed.
+//   - Route attached and forwarding invalid -> Programmed=False, Reason=Invalid
+//     (SSH server assigned a hostname/port that does not match the request).
+func (r *GatewayReconciler) listenerProgrammedCondition(l *Listener) metav1.Condition {
+	base := metav1.Condition{
+		Type:               string(gatewayv1.ListenerConditionProgrammed),
+		LastTransitionTime: metav1.Now(),
+	}
+
+	if !r.manager.IsConnected() {
+		base.Status = metav1.ConditionFalse
+		base.Reason = string(gatewayv1.ListenerReasonPending)
+		base.Message = "SSH tunnel manager is not connected"
+		return base
+	}
+
+	if l.route == nil {
+		base.Status = metav1.ConditionTrue
+		base.Reason = string(gatewayv1.ListenerReasonProgrammed)
+		base.Message = "listener configured, awaiting route attachment"
+		return base
+	}
+
+	if !r.isForwardingValid(l) {
+		base.Status = metav1.ConditionFalse
+		base.Reason = string(gatewayv1.ListenerReasonInvalid)
+		base.Message = fmt.Sprintf(
+			"SSH server did not honor requested hostname/port %s:%d", l.Hostname, l.Port)
+		return base
+	}
+
+	base.Status = metav1.ConditionTrue
+	base.Reason = string(gatewayv1.ListenerReasonProgrammed)
+	base.Message = "listener programmed and forwarding active"
+	return base
+}
+
 // setupRouteForwarding handles the actual forwarding setup for a route.
 // This includes stopping any existing forwarding and starting the new one.
 func (r *GatewayReconciler) setupRouteForwarding(l *Listener, gwKey, routeName, routeNamespace, backendHost string, backendPort int, listenerName string) error {
