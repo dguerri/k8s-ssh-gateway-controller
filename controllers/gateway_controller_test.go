@@ -2484,3 +2484,67 @@ func TestBuildListenerStatuses_GatewayNotInRegistry(t *testing.T) {
 	statuses := r.buildListenerStatuses("ns", "missing")
 	assert.Nil(t, statuses)
 }
+
+func TestUpdateGatewayStatusIfChanged_ReflectsBrokenForwarding(t *testing.T) {
+	s := newGatewayTestScheme()
+
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "ns"},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "test-class",
+			Listeners: []gatewayv1.Listener{{
+				Name:     "http",
+				Hostname: ptrHostname("bad.example.com"),
+				Port:     80,
+				Protocol: gatewayv1.HTTPProtocolType,
+			}},
+		},
+	}
+	cli := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(gw).WithStatusSubresource(gw).Build()
+
+	mgr := &mockSSHTunnelManager{
+		connected: true,
+		assignedAddrs: map[string][]string{
+			forwardingKey("bad.example.com", 80): {"http://fallback-xyz.tuns.sh"},
+		},
+	}
+	r := &GatewayReconciler{
+		Client:   cli,
+		Scheme:   s,
+		manager:  mgr,
+		gateways: map[string]*gateway{},
+	}
+	r.gateways["ns/gw"] = &gateway{
+		listeners: map[string]*Listener{
+			"http": {Protocol: "HTTP", Hostname: "bad.example.com", Port: 80,
+				route: &Route{Name: "r", Namespace: "ns", Host: "svc", Port: 8080}},
+		},
+	}
+
+	require.NoError(t, r.updateGatewayStatusIfChanged(context.Background(), gw, "ns/gw"))
+
+	var got gatewayv1.Gateway
+	require.NoError(t, cli.Get(context.Background(),
+		client.ObjectKey{Namespace: "ns", Name: "gw"}, &got))
+
+	var progCond *metav1.Condition
+	for i := range got.Status.Conditions {
+		if got.Status.Conditions[i].Type == string(gatewayv1.GatewayConditionProgrammed) {
+			progCond = &got.Status.Conditions[i]
+		}
+	}
+	require.NotNil(t, progCond)
+	assert.Equal(t, metav1.ConditionFalse, progCond.Status)
+	// NOTE: Task 2 fix-up changed the reason to Invalid. Use that here too.
+	assert.Equal(t, string(gatewayv1.GatewayReasonInvalid), progCond.Reason)
+
+	require.Len(t, got.Status.Listeners, 1)
+	assert.Equal(t, gatewayv1.SectionName("http"), got.Status.Listeners[0].Name)
+}
+
+// ptrHostname returns a pointer to a gatewayv1.Hostname value.
+func ptrHostname(s string) *gatewayv1.Hostname {
+	h := gatewayv1.Hostname(s)
+	return &h
+}

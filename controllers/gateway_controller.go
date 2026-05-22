@@ -685,7 +685,8 @@ func (r *GatewayReconciler) updateGatewayStatus(ctx context.Context, gwNamespace
 // updateGatewayStatusIfChanged updates the Gateway status in K8s if either conditions or addresses changed.
 // This ensures both conditions and addresses are persisted when they change, while avoiding unnecessary API calls.
 func (r *GatewayReconciler) updateGatewayStatusIfChanged(ctx context.Context, k8sGw *gatewayv1.Gateway, key string) error {
-	// Update Gateway status with Accepted=True and Programmed=True
+	// Accepted stays True — the Gateway spec is structurally valid because
+	// the controller accepted it. Programmed is derived from listener state.
 	conditionsChanged := apiMeta.SetStatusCondition(&k8sGw.Status.Conditions, metav1.Condition{
 		Type:               string(gatewayv1.GatewayConditionAccepted),
 		Status:             metav1.ConditionTrue,
@@ -693,25 +694,34 @@ func (r *GatewayReconciler) updateGatewayStatusIfChanged(ctx context.Context, k8
 		Message:            "Gateway accepted by controller",
 		LastTransitionTime: metav1.Now(),
 	})
-	conditionsChanged = apiMeta.SetStatusCondition(&k8sGw.Status.Conditions, metav1.Condition{
-		Type:               string(gatewayv1.GatewayConditionProgrammed),
-		Status:             metav1.ConditionTrue,
-		Reason:             "Programmed",
-		Message:            "Gateway programmed successfully",
-		LastTransitionTime: metav1.Now(),
-	}) || conditionsChanged
 
-	// Populate status.addresses with actual assigned addresses from SSH tunnels
+	listenerStatuses := r.buildListenerStatuses(k8sGw.Namespace, k8sGw.Name)
+	listenerProgrammed := make([]metav1.Condition, 0, len(listenerStatuses))
+	for _, ls := range listenerStatuses {
+		for _, c := range ls.Conditions {
+			if c.Type == string(gatewayv1.ListenerConditionProgrammed) {
+				listenerProgrammed = append(listenerProgrammed, c)
+			}
+		}
+	}
+	gwProgrammed := aggregateGatewayProgrammed(listenerProgrammed)
+	conditionsChanged = apiMeta.SetStatusCondition(&k8sGw.Status.Conditions, gwProgrammed) || conditionsChanged
+
+	listenersChanged := !listenerStatusesEqual(k8sGw.Status.Listeners, listenerStatuses)
+	if listenersChanged {
+		k8sGw.Status.Listeners = listenerStatuses
+	}
+
 	oldAddresses := k8sGw.Status.Addresses
 	r.updateGatewayAddresses(k8sGw)
 	addressesChanged := !gatewayAddressesEqual(oldAddresses, k8sGw.Status.Addresses)
 
-	// Only update status if conditions or addresses have changed
-	if conditionsChanged || addressesChanged {
+	if conditionsChanged || addressesChanged || listenersChanged {
 		slog.With("function", "updateGatewayStatusIfChanged").Debug("gateway status changed, updating",
 			"gateway", key,
 			"conditionsChanged", conditionsChanged,
-			"addressesChanged", addressesChanged)
+			"addressesChanged", addressesChanged,
+			"listenersChanged", listenersChanged)
 		if err := r.Status().Update(ctx, k8sGw); err != nil {
 			slog.With("function", "updateGatewayStatusIfChanged").Error("failed to update Gateway status", "gateway", key, "error", err)
 			return err
@@ -720,6 +730,45 @@ func (r *GatewayReconciler) updateGatewayStatusIfChanged(ctx context.Context, k8
 		slog.With("function", "updateGatewayStatusIfChanged").Debug("gateway status unchanged, skipping update", "gateway", key)
 	}
 	return nil
+}
+
+// listenerStatusesEqual is an order-independent comparison of two listener
+// status slices. Two statuses are equal iff they have the same Name,
+// AttachedRoutes count, and the same Programmed condition Status/Reason.
+// LastTransitionTime is intentionally ignored to avoid spurious status
+// writes on every reconcile.
+func listenerStatusesEqual(a, b []gatewayv1.ListenerStatus) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	index := func(s []gatewayv1.ListenerStatus) map[string]gatewayv1.ListenerStatus {
+		m := make(map[string]gatewayv1.ListenerStatus, len(s))
+		for _, ls := range s {
+			m[string(ls.Name)] = ls
+		}
+		return m
+	}
+	aIdx, bIdx := index(a), index(b)
+	progOf := func(ls gatewayv1.ListenerStatus) (metav1.ConditionStatus, string) {
+		for _, c := range ls.Conditions {
+			if c.Type == string(gatewayv1.ListenerConditionProgrammed) {
+				return c.Status, c.Reason
+			}
+		}
+		return metav1.ConditionUnknown, ""
+	}
+	for name, av := range aIdx {
+		bv, ok := bIdx[name]
+		if !ok || av.AttachedRoutes != bv.AttachedRoutes {
+			return false
+		}
+		as, ar := progOf(av)
+		bs, br := progOf(bv)
+		if as != bs || ar != br {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *GatewayReconciler) handleAddOrUpdateGateway(_ context.Context, k8sGw *gatewayv1.Gateway) error {
