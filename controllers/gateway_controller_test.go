@@ -2548,3 +2548,121 @@ func ptrHostname(s string) *gatewayv1.Hostname {
 	h := gatewayv1.Hostname(s)
 	return &h
 }
+
+func TestListenerStatusesEqual(t *testing.T) {
+	programmedTrue := metav1.Condition{
+		Type:   string(gatewayv1.ListenerConditionProgrammed),
+		Status: metav1.ConditionTrue,
+		Reason: string(gatewayv1.ListenerReasonProgrammed),
+	}
+	programmedFalse := metav1.Condition{
+		Type:   string(gatewayv1.ListenerConditionProgrammed),
+		Status: metav1.ConditionFalse,
+		Reason: string(gatewayv1.ListenerReasonInvalid),
+	}
+	otherCondition := metav1.Condition{
+		Type:   string(gatewayv1.ListenerConditionAccepted),
+		Status: metav1.ConditionTrue,
+		Reason: "Accepted",
+	}
+	mkStatus := func(name string, attached int32, conds ...metav1.Condition) gatewayv1.ListenerStatus {
+		return gatewayv1.ListenerStatus{
+			Name:           gatewayv1.SectionName(name),
+			AttachedRoutes: attached,
+			Conditions:     conds,
+		}
+	}
+
+	tests := []struct {
+		name string
+		a, b []gatewayv1.ListenerStatus
+		want bool
+	}{
+		{
+			name: "both nil",
+			want: true,
+		},
+		{
+			name: "nil vs empty",
+			a:    nil,
+			b:    []gatewayv1.ListenerStatus{},
+			want: true,
+		},
+		{
+			name: "different lengths",
+			a:    []gatewayv1.ListenerStatus{mkStatus("http", 1, programmedTrue)},
+			b:    nil,
+			want: false,
+		},
+		{
+			name: "same single listener, same condition",
+			a:    []gatewayv1.ListenerStatus{mkStatus("http", 1, programmedTrue)},
+			b:    []gatewayv1.ListenerStatus{mkStatus("http", 1, programmedTrue)},
+			want: true,
+		},
+		{
+			name: "different names but same length",
+			a:    []gatewayv1.ListenerStatus{mkStatus("http", 1, programmedTrue)},
+			b:    []gatewayv1.ListenerStatus{mkStatus("https", 1, programmedTrue)},
+			want: false,
+		},
+		{
+			name: "same name, different attached count",
+			a:    []gatewayv1.ListenerStatus{mkStatus("http", 1, programmedTrue)},
+			b:    []gatewayv1.ListenerStatus{mkStatus("http", 2, programmedTrue)},
+			want: false,
+		},
+		{
+			name: "same name, different Programmed status",
+			a:    []gatewayv1.ListenerStatus{mkStatus("http", 1, programmedTrue)},
+			b:    []gatewayv1.ListenerStatus{mkStatus("http", 1, programmedFalse)},
+			want: false,
+		},
+		{
+			name: "missing Programmed condition on one side",
+			a:    []gatewayv1.ListenerStatus{mkStatus("http", 1, programmedTrue)},
+			b:    []gatewayv1.ListenerStatus{mkStatus("http", 1, otherCondition)},
+			want: false,
+		},
+		{
+			name: "missing Programmed condition on both sides",
+			a:    []gatewayv1.ListenerStatus{mkStatus("http", 1, otherCondition)},
+			b:    []gatewayv1.ListenerStatus{mkStatus("http", 1, otherCondition)},
+			want: true,
+		},
+		{
+			name: "order-independent: same listeners reversed",
+			a: []gatewayv1.ListenerStatus{
+				mkStatus("http", 1, programmedTrue),
+				mkStatus("https", 0, programmedFalse),
+			},
+			b: []gatewayv1.ListenerStatus{
+				mkStatus("https", 0, programmedFalse),
+				mkStatus("http", 1, programmedTrue),
+			},
+			want: true,
+		},
+		{
+			name: "LastTransitionTime differs but ignored",
+			a: []gatewayv1.ListenerStatus{mkStatus("http", 1, metav1.Condition{
+				Type:               string(gatewayv1.ListenerConditionProgrammed),
+				Status:             metav1.ConditionTrue,
+				Reason:             string(gatewayv1.ListenerReasonProgrammed),
+				LastTransitionTime: metav1.Now(),
+			})},
+			b: []gatewayv1.ListenerStatus{mkStatus("http", 1, metav1.Condition{
+				Type:               string(gatewayv1.ListenerConditionProgrammed),
+				Status:             metav1.ConditionTrue,
+				Reason:             string(gatewayv1.ListenerReasonProgrammed),
+				LastTransitionTime: metav1.NewTime(time.Now().Add(-time.Hour)),
+			})},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, listenerStatusesEqual(tt.a, tt.b))
+		})
+	}
+}
