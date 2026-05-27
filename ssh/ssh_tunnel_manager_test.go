@@ -6,14 +6,68 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 )
+
+// decodeChannelForwardMsg decodes the payload of a tcpip-forward /
+// cancel-tcpip-forward SSH global request. The wire format is:
+//
+//	string  bind_address
+//	uint32  bind_port
+//
+// channelForwardMsg has unexported fields so ssh.Unmarshal cannot set them via
+// reflection; we parse the wire format manually instead.
+func decodeChannelForwardMsg(payload []byte) (addr string, port uint32, ok bool) {
+	if len(payload) < 4 {
+		return "", 0, false
+	}
+	addrLen := binary.BigEndian.Uint32(payload[0:4])
+	if uint32(len(payload)) < 4+addrLen+4 {
+		return "", 0, false
+	}
+	addr = string(payload[4 : 4+addrLen])
+	port = binary.BigEndian.Uint32(payload[4+addrLen : 8+addrLen])
+	return addr, port, true
+}
+
+// forwardRequestRecord captures one tcpip-forward or cancel-tcpip-forward call
+// observed by a test fakeClient, with the decoded address and port.
+type forwardRequestRecord struct {
+	name string
+	addr string
+	port uint32
+}
+
+// recordingSendRequest returns a sendRequestFunc that appends each
+// tcpip-forward and cancel-tcpip-forward call (with its decoded payload) to
+// the slice guarded by mu, and forwards every call to the wrapped function
+// (or returns success when wrapped is nil).
+func recordingSendRequest(mu *sync.Mutex, calls *[]forwardRequestRecord,
+	wrapped func(name string, wantReply bool, payload []byte) (bool, []byte, error),
+) func(name string, wantReply bool, payload []byte) (bool, []byte, error) {
+	return func(name string, wantReply bool, payload []byte) (bool, []byte, error) {
+		if name == "tcpip-forward" || name == "cancel-tcpip-forward" {
+			addr, port, ok := decodeChannelForwardMsg(payload)
+			if ok {
+				mu.Lock()
+				*calls = append(*calls, forwardRequestRecord{name: name, addr: addr, port: port})
+				mu.Unlock()
+			}
+		}
+		if wrapped != nil {
+			return wrapped(name, wantReply, payload)
+		}
+		return true, nil, nil
+	}
+}
 
 // TestNewSSHTunnelManagerWithInvalidKey tests creating an SSH tunnel manager with an invalid key.
 func TestNewSSHTunnelManagerWithInvalidKey(t *testing.T) {
@@ -1590,5 +1644,368 @@ func TestHandleChannelsClosesBothEndsOnOneSidedEOF(t *testing.T) {
 	}
 	if got := localConn.closeCalls.Load(); got == 0 {
 		t.Errorf("expected local connection Close() to be called, got 0 calls")
+	}
+}
+
+// TestWrongPortCancelUsesBoundPort verifies that when the SSH server returns a
+// TCP URI bound to a port different from the one we requested
+// (EnforcePort=true), the resulting cancel-tcpip-forward targets the
+// server-bound port rather than the originally-requested port. Cancelling the
+// requested port would leak the random port the server actually bound.
+//
+// Regression: previously handleAssignedURIs sent cancel for fwd.RemotePort,
+// causing observed tuns.sh behavior where each retry leaked another random
+// port on the server.
+func TestWrongPortCancelUsesBoundPort(t *testing.T) {
+	SetupTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const requestedPort = 27202
+	const boundPort = 49468
+
+	var (
+		callsMu sync.Mutex
+		calls   []forwardRequestRecord
+	)
+
+	remoteAddrFunc := func(data string) ([]string, error) {
+		return []string{fmt.Sprintf("tcp://nue.tuns.sh:%d", boundPort)}, nil
+	}
+
+	var currentManager *SSHTunnelManager
+	sshDial = func(network, addr string, cfg *ssh.ClientConfig) (sshClient, error) {
+		client := &fakeClient{}
+		client.sendRequestFunc = recordingSendRequest(&callsMu, &calls,
+			func(name string, wantReply bool, payload []byte) (bool, []byte, error) {
+				if name == "tcpip-forward" {
+					// Deliver the wrong-port URI via the notification channel
+					// shortly after the tcpip-forward request is accepted.
+					go func() {
+						time.Sleep(5 * time.Millisecond)
+						if currentManager == nil {
+							return
+						}
+						key := forwardingKey("localhost", requestedPort)
+						currentManager.addrNotifMu.Lock()
+						if ch, ok := currentManager.addrNotifications[key]; ok {
+							select {
+							case ch <- []string{fmt.Sprintf("tcp://nue.tuns.sh:%d", boundPort)}:
+							default:
+							}
+						}
+						currentManager.addrNotifMu.Unlock()
+					}()
+				}
+				return true, nil, nil
+			})
+		return client, nil
+	}
+
+	sshConfig := SSHConnectionConfig{
+		PrivateKey:                 GenerateTestPrivateKey(t),
+		ServerAddress:              "example.com:22",
+		Username:                   "testuser",
+		ConnectTimeout:             5 * time.Second,
+		FwdReqTimeout:              2 * time.Second,
+		KeepAliveInterval:          5 * time.Second,
+		RemoteAddrFunc:             remoteAddrFunc,
+		AddressVerificationTimeout: 500 * time.Millisecond,
+	}
+
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+	if err != nil {
+		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+	}
+	currentManager = manager
+
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+
+	err = manager.StartForwarding(ForwardingConfig{
+		RemoteHost:   "localhost",
+		RemotePort:   requestedPort,
+		InternalHost: "localhost",
+		InternalPort: 8080,
+		EnforcePort:  true,
+	})
+	if err == nil {
+		t.Fatal("Expected error from StartForwarding on wrong port assignment")
+	}
+
+	// Locate the wrong-hostname-cleanup cancel call. We tolerate extra
+	// cancels for the pre-emptive cleanup (requestedPort) and orphan
+	// cancels for the default fake channel (0.0.0.0:2222) — only the
+	// cleanup of the actually-bound port is what we assert here.
+	callsMu.Lock()
+	defer callsMu.Unlock()
+
+	var foundBoundCancel, foundRequestedCancelAfterTcpip bool
+	tcpipSeen := false
+	for _, c := range calls {
+		if c.name == "tcpip-forward" && c.port == requestedPort {
+			tcpipSeen = true
+			continue
+		}
+		if c.name != "cancel-tcpip-forward" {
+			continue
+		}
+		if c.port == boundPort {
+			foundBoundCancel = true
+		}
+		if c.port == requestedPort && tcpipSeen {
+			foundRequestedCancelAfterTcpip = true
+		}
+	}
+
+	if !foundBoundCancel {
+		t.Errorf("expected cancel-tcpip-forward for bound port %d, calls=%+v", boundPort, calls)
+	}
+	if foundRequestedCancelAfterTcpip {
+		t.Errorf("did not expect cancel-tcpip-forward for requested port %d after tcpip-forward (would leak bound port), calls=%+v", requestedPort, calls)
+	}
+}
+
+// TestPreemptiveCancelOnEnforcePort verifies that StartForwarding with
+// EnforcePort=true sends a best-effort cancel-tcpip-forward for the requested
+// address:port before sending the tcpip-forward request, to clear any stale
+// reservation left on the SSH server by a previous session. With
+// EnforcePort=false no pre-emptive cancel must be sent.
+func TestPreemptiveCancelOnEnforcePort(t *testing.T) {
+	t.Run("EnforcePort=true sends pre-emptive cancel before tcpip-forward", func(t *testing.T) {
+		SetupTest(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		const requestedPort = 27202
+
+		var (
+			callsMu sync.Mutex
+			calls   []forwardRequestRecord
+		)
+
+		remoteAddrFunc := func(data string) ([]string, error) {
+			return []string{fmt.Sprintf("tcp://nue.tuns.sh:%d", requestedPort)}, nil
+		}
+
+		var currentManager *SSHTunnelManager
+		sshDial = func(network, addr string, cfg *ssh.ClientConfig) (sshClient, error) {
+			client := &fakeClient{}
+			client.sendRequestFunc = recordingSendRequest(&callsMu, &calls,
+				func(name string, wantReply bool, payload []byte) (bool, []byte, error) {
+					if name == "tcpip-forward" {
+						go func() {
+							time.Sleep(5 * time.Millisecond)
+							if currentManager == nil {
+								return
+							}
+							key := forwardingKey("localhost", requestedPort)
+							currentManager.addrNotifMu.Lock()
+							if ch, ok := currentManager.addrNotifications[key]; ok {
+								select {
+								case ch <- []string{fmt.Sprintf("tcp://nue.tuns.sh:%d", requestedPort)}:
+								default:
+								}
+							}
+							currentManager.addrNotifMu.Unlock()
+						}()
+					}
+					return true, nil, nil
+				})
+			return client, nil
+		}
+
+		sshConfig := SSHConnectionConfig{
+			PrivateKey:                 GenerateTestPrivateKey(t),
+			ServerAddress:              "example.com:22",
+			Username:                   "testuser",
+			ConnectTimeout:             5 * time.Second,
+			FwdReqTimeout:              2 * time.Second,
+			KeepAliveInterval:          5 * time.Second,
+			RemoteAddrFunc:             remoteAddrFunc,
+			AddressVerificationTimeout: 500 * time.Millisecond,
+		}
+
+		manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+		if err != nil {
+			t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+		}
+		currentManager = manager
+
+		if err := manager.Connect(); err != nil {
+			t.Fatalf("Failed to connect: %v", err)
+		}
+
+		if err := manager.StartForwarding(ForwardingConfig{
+			RemoteHost:   "localhost",
+			RemotePort:   requestedPort,
+			InternalHost: "localhost",
+			InternalPort: 8080,
+			EnforcePort:  true,
+		}); err != nil {
+			t.Fatalf("Expected successful forwarding, got: %v", err)
+		}
+
+		// Find the index of the first tcpip-forward for our port, and the
+		// index of the first cancel-tcpip-forward for the same port. The
+		// cancel must precede the tcpip-forward.
+		callsMu.Lock()
+		defer callsMu.Unlock()
+
+		firstCancelIdx, firstTcpipIdx := -1, -1
+		for i, c := range calls {
+			if c.port != requestedPort {
+				continue
+			}
+			if firstCancelIdx == -1 && c.name == "cancel-tcpip-forward" {
+				firstCancelIdx = i
+			}
+			if firstTcpipIdx == -1 && c.name == "tcpip-forward" {
+				firstTcpipIdx = i
+			}
+		}
+		if firstCancelIdx == -1 {
+			t.Fatalf("expected a pre-emptive cancel-tcpip-forward for port %d, calls=%+v", requestedPort, calls)
+		}
+		if firstTcpipIdx == -1 {
+			t.Fatalf("expected a tcpip-forward for port %d, calls=%+v", requestedPort, calls)
+		}
+		if firstCancelIdx >= firstTcpipIdx {
+			t.Errorf("expected pre-emptive cancel to precede tcpip-forward: cancelIdx=%d tcpipIdx=%d calls=%+v",
+				firstCancelIdx, firstTcpipIdx, calls)
+		}
+	})
+
+	t.Run("EnforcePort=false sends no pre-emptive cancel", func(t *testing.T) {
+		SetupTest(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		const requestedPort = 27202
+
+		var (
+			callsMu sync.Mutex
+			calls   []forwardRequestRecord
+		)
+
+		sshDial = func(network, addr string, cfg *ssh.ClientConfig) (sshClient, error) {
+			client := &fakeClient{}
+			client.sendRequestFunc = recordingSendRequest(&callsMu, &calls, nil)
+			return client, nil
+		}
+
+		sshConfig := SSHConnectionConfig{
+			PrivateKey:        GenerateTestPrivateKey(t),
+			ServerAddress:     "example.com:22",
+			Username:          "testuser",
+			ConnectTimeout:    5 * time.Second,
+			FwdReqTimeout:     2 * time.Second,
+			KeepAliveInterval: 5 * time.Second,
+			// No RemoteAddrFunc → no URI verification, sendForwarding
+			// short-circuits after sendForwardingOnce.
+		}
+
+		manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+		if err != nil {
+			t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+		}
+
+		if err := manager.Connect(); err != nil {
+			t.Fatalf("Failed to connect: %v", err)
+		}
+
+		if err := manager.StartForwarding(ForwardingConfig{
+			RemoteHost:   "localhost",
+			RemotePort:   requestedPort,
+			InternalHost: "localhost",
+			InternalPort: 8080,
+			EnforcePort:  false,
+		}); err != nil {
+			t.Fatalf("Expected successful forwarding, got: %v", err)
+		}
+
+		callsMu.Lock()
+		defer callsMu.Unlock()
+
+		for _, c := range calls {
+			if c.name == "cancel-tcpip-forward" && c.port == requestedPort {
+				t.Errorf("did not expect any pre-emptive cancel-tcpip-forward for port %d when EnforcePort=false, calls=%+v",
+					requestedPort, calls)
+				break
+			}
+		}
+	})
+}
+
+// TestOrphanForwardedChannelTriggersCancel verifies that when the SSH server
+// opens a forwarded-tcpip channel for an address:port we have no registered
+// forwarding for (e.g. a stale reservation from a previous SSH session that
+// the server is still announcing), the manager sends a cancel-tcpip-forward
+// for that address:port to ask the server to release it.
+func TestOrphanForwardedChannelTriggersCancel(t *testing.T) {
+	SetupTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const orphanAddr = "localhost"
+	const orphanPort uint32 = 27202
+
+	orphanChan := &fakeNewSshChannel{
+		channelType: "forwarded-tcpip",
+		extraData: ssh.Marshal(forwardedTCPPayload{
+			Addr:       orphanAddr,
+			Port:       orphanPort,
+			OriginAddr: orphanAddr,
+			OriginPort: orphanPort,
+		}),
+	}
+
+	cancelSeen := make(chan struct{})
+	var cancelOnce sync.Once
+	var (
+		callsMu sync.Mutex
+		calls   []forwardRequestRecord
+	)
+
+	sshDial = func(network, addr string, cfg *ssh.ClientConfig) (sshClient, error) {
+		client := &fakeClient{customNewChannel: orphanChan}
+		client.sendRequestFunc = recordingSendRequest(&callsMu, &calls,
+			func(name string, wantReply bool, payload []byte) (bool, []byte, error) {
+				if name == "cancel-tcpip-forward" {
+					if a, p, ok := decodeChannelForwardMsg(payload); ok && a == orphanAddr && p == orphanPort {
+						cancelOnce.Do(func() { close(cancelSeen) })
+					}
+				}
+				return true, nil, nil
+			})
+		return client, nil
+	}
+
+	sshConfig := SSHConnectionConfig{
+		PrivateKey:        GenerateTestPrivateKey(t),
+		ServerAddress:     "example.com:22",
+		Username:          "testuser",
+		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
+		KeepAliveInterval: 5 * time.Second,
+	}
+
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+	if err != nil {
+		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+	}
+
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+
+	select {
+	case <-cancelSeen:
+	case <-time.After(2 * time.Second):
+		callsMu.Lock()
+		defer callsMu.Unlock()
+		t.Fatalf("expected cancel-tcpip-forward for orphan %s:%d within 2s, calls=%+v",
+			orphanAddr, orphanPort, calls)
 	}
 }

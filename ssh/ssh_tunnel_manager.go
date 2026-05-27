@@ -518,6 +518,14 @@ func (m *SSHTunnelManager) sendForwarding(fwd *ForwardingConfig, req ForwardRequ
 		}()
 	}
 
+	// Pre-emptive cleanup: when enforcing a specific port, ask the server to
+	// release any stale binding for this address:port left over from a
+	// previous SSH session before requesting a fresh one. Best-effort — a
+	// "no such forwarding" failure is the expected normal-path outcome.
+	if req == ForwardStart && fwd.EnforcePort {
+		m.cancelForwarding(fwd.RemoteHost, fwd.RemotePort, "pre-emptive-cleanup")
+	}
+
 	// Send the request once
 	err := m.sendForwardingOnce(fwd, req)
 	if err != nil {
@@ -586,9 +594,16 @@ func (m *SSHTunnelManager) handleAssignedURIs(fwd *ForwardingConfig, key string,
 	if needsVerification && !MatchesRequestedHost(uris, fwd.RemoteHost, fwd.RemotePort, fwd.EnforcePort) {
 		slog.With("function", "sendForwarding").Warn("wrong hostname assigned",
 			"requested_host", fwd.RemoteHost, "received_uris", uris)
-		if cancelErr := m.sendForwardingOnce(fwd, ForwardCancel); cancelErr != nil {
-			slog.With("function", "sendForwarding").Error("failed to cancel forwarding after hostname mismatch, remote listener may leak",
-				"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort, "error", cancelErr)
+		// Cancel by the port the server actually bound, not the one we
+		// requested — cancelling the requested port leaks the random port
+		// the server allocated.
+		for _, uri := range uris {
+			if !strings.HasPrefix(uri, "tcp://") {
+				continue
+			}
+			if boundPort, ok := tcpURIPort(uri); ok {
+				m.cancelForwarding(fwd.RemoteHost, boundPort, "wrong-hostname-cleanup")
+			}
 		}
 		return fmt.Errorf("wrong hostname assigned: %v", uris)
 	}
@@ -605,6 +620,19 @@ func (m *SSHTunnelManager) handleAssignedURIs(fwd *ForwardingConfig, key string,
 	m.assignedAddrs[key] = uris
 	m.addrNotifMu.Unlock()
 	return nil
+}
+
+// cancelForwarding sends a best-effort cancel-tcpip-forward for the given
+// remote host:port. Failures are logged and otherwise ignored — the server may
+// legitimately have no such forwarding (e.g. when used pre-emptively to clear
+// stale state from a previous SSH session).
+// Must be called with at least an RLock on m.clientMu.
+func (m *SSHTunnelManager) cancelForwarding(host string, port int, reason string) {
+	fwd := &ForwardingConfig{RemoteHost: host, RemotePort: port}
+	if err := m.sendForwardingOnce(fwd, ForwardCancel); err != nil {
+		slog.With("function", "cancelForwarding").Warn("failed to cancel forwarding on server",
+			"remote_host", host, "remote_port", port, "reason", reason, "error", err)
+	}
 }
 
 // sendForwardingOnce sends a single forwarding request without retry logic.
@@ -813,8 +841,23 @@ func (m *SSHTunnelManager) handleChannels() {
 					}(ch)
 					logger.Debug("forwarding established", "key", key)
 				} else {
-					logger.Warn("unable to find forwarding session")
+					logger.Warn("unable to find forwarding session, cancelling orphan forwarding on server",
+						"remote_host", payload.Addr, "remote_port", payload.Port)
 					_ = ch.Reject(ssh.ConnectionFailed, "unable to find forwarding session") // #nosec G104 -- Best effort rejection
+
+					// The server is still forwarding a port we don't have registered —
+					// typically a reservation left over on the server from a previous
+					// SSH session. Ask the server to release it so it stops opening
+					// channels and (when the server allows it) so the port becomes
+					// available again for a fresh tcpip-forward request.
+					go func(addr string, port uint32) {
+						m.clientMu.RLock()
+						defer m.clientMu.RUnlock()
+						if !m.connected || m.client == nil {
+							return
+						}
+						m.cancelForwarding(addr, int(port), "orphan-channel")
+					}(payload.Addr, payload.Port)
 				}
 			default:
 				logger.Warn("unknown channel type received", "channel_type", channelType)
