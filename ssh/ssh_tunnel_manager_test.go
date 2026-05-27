@@ -2009,3 +2009,186 @@ func TestOrphanForwardedChannelTriggersCancel(t *testing.T) {
 			orphanAddr, orphanPort, calls)
 	}
 }
+
+// TestTcpURIPort covers the error branches of tcpURIPort (missing port,
+// non-numeric port, non-tcp scheme) in addition to the happy path.
+func TestTcpURIPort(t *testing.T) {
+	cases := []struct {
+		name     string
+		uri      string
+		wantPort int
+		wantOK   bool
+	}{
+		{"valid tcp URI", "tcp://example.com:8080", 8080, true},
+		{"valid tcp URI with IPv6", "tcp://[::1]:8080", 8080, true},
+		{"missing port", "tcp://example.com", 0, false},
+		{"non-numeric port", "tcp://example.com:notaport", 0, false},
+		{"empty string", "", 0, false},
+		{"http scheme (prefix not stripped, parse fails)", "http://example.com:8080", 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotPort, gotOK := tcpURIPort(tc.uri)
+			if gotPort != tc.wantPort || gotOK != tc.wantOK {
+				t.Errorf("tcpURIPort(%q) = (%d, %v), want (%d, %v)",
+					tc.uri, gotPort, gotOK, tc.wantPort, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestCancelForwardingLogsOnError ensures the helper executes the error-log
+// branch when the underlying SendRequest fails (e.g. the server denies the
+// cancel because no such forwarding exists). Failure is swallowed; no panic.
+func TestCancelForwardingLogsOnError(t *testing.T) {
+	SetupTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	denyErr := errors.New("simulated server error")
+	sshDial = func(network, addr string, cfg *ssh.ClientConfig) (sshClient, error) {
+		return &fakeClient{
+			sendRequestFunc: func(name string, wantReply bool, payload []byte) (bool, []byte, error) {
+				if name == "cancel-tcpip-forward" {
+					return false, nil, denyErr
+				}
+				return true, nil, nil
+			},
+		}, nil
+	}
+
+	sshConfig := SSHConnectionConfig{
+		PrivateKey:        GenerateTestPrivateKey(t),
+		ServerAddress:     "example.com:22",
+		Username:          "testuser",
+		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
+		KeepAliveInterval: 5 * time.Second,
+	}
+
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+	if err != nil {
+		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+	}
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+
+	// Direct invocation under the read lock (matches the helper's contract).
+	manager.clientMu.RLock()
+	defer manager.clientMu.RUnlock()
+	// Must not panic; error is logged and swallowed.
+	manager.cancelForwarding("localhost", 27202, "test-error-path")
+}
+
+// TestHandleVerificationTimeoutWildcardReturnsNil covers the warn-only branch
+// of handleVerificationTimeout: when the requested host is a wildcard
+// ("0.0.0.0") and EnforcePort is false, a timeout is non-fatal — the helper
+// logs a warning and returns nil without cancelling.
+func TestHandleVerificationTimeoutWildcardReturnsNil(t *testing.T) {
+	SetupTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sshConfig := SSHConnectionConfig{
+		PrivateKey:        GenerateTestPrivateKey(t),
+		ServerAddress:     "example.com:22",
+		Username:          "testuser",
+		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
+		KeepAliveInterval: 5 * time.Second,
+	}
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+	if err != nil {
+		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+	}
+
+	fwd := &ForwardingConfig{RemoteHost: "0.0.0.0", RemotePort: 2222}
+	if err := manager.handleVerificationTimeout(fwd, false); err != nil {
+		t.Errorf("expected nil error for wildcard host with needsVerification=false, got %v", err)
+	}
+}
+
+// TestProcessServerDataExtractorError verifies that when the extractor
+// callback returns an error, processServerData logs and returns without
+// notifying URI waiters. Pairs with the happy-path coverage exercised by the
+// other tests.
+func TestProcessServerDataExtractorError(t *testing.T) {
+	SetupTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Register a waiter; if extractor errored we must NOT receive on this
+	// channel.
+	const key = "localhost:1234"
+	notif := make(chan []string, 1)
+
+	sshConfig := SSHConnectionConfig{
+		PrivateKey:        GenerateTestPrivateKey(t),
+		ServerAddress:     "example.com:22",
+		Username:          "testuser",
+		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
+		KeepAliveInterval: 5 * time.Second,
+		RemoteAddrFunc: func(data string) ([]string, error) {
+			return nil, errors.New("simulated extractor failure")
+		},
+	}
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+	if err != nil {
+		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+	}
+
+	manager.addrNotifMu.Lock()
+	manager.addrNotifications[key] = notif
+	manager.addrNotifMu.Unlock()
+
+	manager.processServerData([]byte("garbage server output"), "stdout")
+
+	select {
+	case got := <-notif:
+		t.Errorf("did not expect notification on extractor error, got %v", got)
+	case <-time.After(20 * time.Millisecond):
+		// Expected: no notification.
+	}
+}
+
+// TestProcessServerDataEmptyURIs covers the early-return branch when the
+// extractor succeeds but returns no URIs — waiters should not be notified.
+func TestProcessServerDataEmptyURIs(t *testing.T) {
+	SetupTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const key = "localhost:1234"
+	notif := make(chan []string, 1)
+
+	sshConfig := SSHConnectionConfig{
+		PrivateKey:        GenerateTestPrivateKey(t),
+		ServerAddress:     "example.com:22",
+		Username:          "testuser",
+		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
+		KeepAliveInterval: 5 * time.Second,
+		RemoteAddrFunc: func(data string) ([]string, error) {
+			return nil, nil // No URIs extracted, no error.
+		},
+	}
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+	if err != nil {
+		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+	}
+
+	manager.addrNotifMu.Lock()
+	manager.addrNotifications[key] = notif
+	manager.addrNotifMu.Unlock()
+
+	manager.processServerData([]byte("non-URI server output"), "stdout")
+
+	select {
+	case got := <-notif:
+		t.Errorf("did not expect notification when no URIs were extracted, got %v", got)
+	case <-time.After(20 * time.Millisecond):
+		// Expected: no notification.
+	}
+}
