@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -2190,5 +2191,311 @@ func TestProcessServerDataEmptyURIs(t *testing.T) {
 		t.Errorf("did not expect notification when no URIs were extracted, got %v", got)
 	case <-time.After(20 * time.Millisecond):
 		// Expected: no notification.
+	}
+}
+
+// recordingNewChannel is an ssh.NewChannel that captures the reason and message
+// passed to Reject, and exposes a rejectSignal channel that fires the first
+// time Reject is invoked. Used to assert that handleChannels rejects channels
+// it cannot process (unknown type, malformed payload, etc.).
+type recordingNewChannel struct {
+	channelType string
+	extraData   []byte
+	channel     ssh.Channel
+
+	mu            sync.Mutex
+	rejectReason  ssh.RejectionReason
+	rejectMessage string
+	rejectOnce    sync.Once
+	rejectSignal  chan struct{}
+}
+
+func newRecordingNewChannel(channelType string, extraData []byte, channel ssh.Channel) *recordingNewChannel {
+	return &recordingNewChannel{
+		channelType:  channelType,
+		extraData:    extraData,
+		channel:      channel,
+		rejectSignal: make(chan struct{}),
+	}
+}
+
+func (r *recordingNewChannel) ChannelType() string { return r.channelType }
+func (r *recordingNewChannel) ExtraData() []byte   { return r.extraData }
+func (r *recordingNewChannel) Accept() (ssh.Channel, <-chan *ssh.Request, error) {
+	requests := make(chan *ssh.Request)
+	close(requests)
+	return r.channel, requests, nil
+}
+func (r *recordingNewChannel) Reject(reason ssh.RejectionReason, message string) error {
+	r.mu.Lock()
+	r.rejectReason = reason
+	r.rejectMessage = message
+	r.mu.Unlock()
+	r.rejectOnce.Do(func() { close(r.rejectSignal) })
+	return nil
+}
+
+// TestConnectIdempotent covers the already-connected early return in Connect():
+// calling Connect() on a connected manager returns nil without re-dialing.
+func TestConnectIdempotent(t *testing.T) {
+	SetupTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dialCalls := 0
+	sshDial = func(network, addr string, cfg *ssh.ClientConfig) (sshClient, error) {
+		dialCalls++
+		return &fakeClient{}, nil
+	}
+
+	manager, err := NewSSHTunnelManager(ctx, &SSHConnectionConfig{
+		PrivateKey:        GenerateTestPrivateKey(t),
+		ServerAddress:     "example.com:22",
+		Username:          "testuser",
+		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
+		KeepAliveInterval: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSSHTunnelManager: %v", err)
+	}
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("first Connect: %v", err)
+	}
+	if err := manager.Connect(); err != nil {
+		t.Errorf("second Connect on a connected manager should be a no-op, got %v", err)
+	}
+	if dialCalls != 1 {
+		t.Errorf("expected exactly 1 dial, got %d", dialCalls)
+	}
+}
+
+// TestStartForwardingInvalidPort covers the port-range validation in
+// sendForwardingOnce: ports outside [0, 65535] must be rejected with an
+// "invalid remote port" error before any SSH request is sent.
+func TestStartForwardingInvalidPort(t *testing.T) {
+	SetupTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	manager, err := NewSSHTunnelManager(ctx, &SSHConnectionConfig{
+		PrivateKey:        GenerateTestPrivateKey(t),
+		ServerAddress:     "example.com:22",
+		Username:          "testuser",
+		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
+		KeepAliveInterval: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSSHTunnelManager: %v", err)
+	}
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	for _, port := range []int{-1, 65536, 70000} {
+		err := manager.StartForwarding(ForwardingConfig{
+			RemoteHost:   "0.0.0.0",
+			RemotePort:   port,
+			InternalHost: "localhost",
+			InternalPort: 8080,
+		})
+		if err == nil || !strings.Contains(err.Error(), "invalid remote port") {
+			t.Errorf("port=%d: expected error containing 'invalid remote port', got %v", port, err)
+		}
+	}
+}
+
+// TestHandleChannelsRejectsUnknownChannelType covers the default-branch in
+// handleChannels: a channel whose type is not "forwarded-tcpip" must be
+// rejected with UnknownChannelType.
+func TestHandleChannelsRejectsUnknownChannelType(t *testing.T) {
+	SetupTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rec := newRecordingNewChannel("session", nil, nil)
+	sshDial = func(network, addr string, cfg *ssh.ClientConfig) (sshClient, error) {
+		return &fakeClient{customNewChannel: rec}, nil
+	}
+
+	manager, err := NewSSHTunnelManager(ctx, &SSHConnectionConfig{
+		PrivateKey:        GenerateTestPrivateKey(t),
+		ServerAddress:     "example.com:22",
+		Username:          "testuser",
+		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
+		KeepAliveInterval: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSSHTunnelManager: %v", err)
+	}
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	select {
+	case <-rec.rejectSignal:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Reject not called within 2s for unknown channel type")
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.rejectReason != ssh.UnknownChannelType {
+		t.Errorf("expected UnknownChannelType, got %v", rec.rejectReason)
+	}
+}
+
+// TestHandleChannelsRejectsMalformedForwardedTCPPayload covers the
+// payload-unmarshal failure branch in handleChannels: a "forwarded-tcpip"
+// channel whose ExtraData cannot be decoded must be rejected with
+// ConnectionFailed.
+func TestHandleChannelsRejectsMalformedForwardedTCPPayload(t *testing.T) {
+	SetupTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// ssh.Unmarshal expects a length-prefixed string + two uint32s; a couple
+	// of stray bytes cannot decode into forwardedTCPPayload.
+	rec := newRecordingNewChannel("forwarded-tcpip", []byte{0x01, 0x02}, nil)
+	sshDial = func(network, addr string, cfg *ssh.ClientConfig) (sshClient, error) {
+		return &fakeClient{customNewChannel: rec}, nil
+	}
+
+	manager, err := NewSSHTunnelManager(ctx, &SSHConnectionConfig{
+		PrivateKey:        GenerateTestPrivateKey(t),
+		ServerAddress:     "example.com:22",
+		Username:          "testuser",
+		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
+		KeepAliveInterval: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSSHTunnelManager: %v", err)
+	}
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	select {
+	case <-rec.rejectSignal:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Reject not called within 2s for malformed payload")
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.rejectReason != ssh.ConnectionFailed {
+		t.Errorf("expected ConnectionFailed, got %v", rec.rejectReason)
+	}
+	if !strings.Contains(rec.rejectMessage, "could not parse forwarded-tcpip payload") {
+		t.Errorf("expected rejection message to mention payload parse failure, got %q", rec.rejectMessage)
+	}
+}
+
+// TestHandleChannelsClosesChannelOnLocalDialError covers the dial-failure
+// branch inside the accept goroutine: when the backend dial fails, the
+// accepted SSH channel must be closed (via the deferred remoteConn.Close()),
+// not left dangling.
+func TestHandleChannelsClosesChannelOnLocalDialError(t *testing.T) {
+	SetupTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	remoteConn := newBlockingSshChannel()
+	newChan := &fakeNewSshChannelWithAccept{
+		channelType: "forwarded-tcpip",
+		extraData: ssh.Marshal(forwardedTCPPayload{
+			Addr: "0.0.0.0",
+			Port: 2222,
+		}),
+		channel: remoteConn,
+	}
+
+	sshConfig := SSHConnectionConfig{
+		PrivateKey:        GenerateTestPrivateKey(t),
+		ServerAddress:     "example.com:22",
+		Username:          "testuser",
+		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
+		KeepAliveInterval: 5 * time.Second,
+		SSHDialFunc: func(network, addr string, cfg *ssh.ClientConfig) (sshClient, error) {
+			return &fakeClient{customNewChannel: newChan}, nil
+		},
+		NetDialFunc: func(network, address string) (net.Conn, error) {
+			return nil, errors.New("simulated local-dial failure")
+		},
+	}
+
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+	if err != nil {
+		t.Fatalf("NewSSHTunnelManager: %v", err)
+	}
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	// Register the matching forwarding so handleChannels enters the accept
+	// branch (rather than the orphan/cancel branch).
+	if err := manager.StartForwarding(ForwardingConfig{
+		RemoteHost:   "0.0.0.0",
+		RemotePort:   2222,
+		InternalHost: "localhost",
+		InternalPort: 8080,
+	}); err != nil {
+		t.Fatalf("StartForwarding: %v", err)
+	}
+
+	select {
+	case <-remoteConn.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("remote SSH channel was not closed within 2s after local-dial failure (Close: %d)",
+			remoteConn.closeCalls.Load())
+	}
+}
+
+// TestNotifyURIWaitersSkipsFullChannels covers the `default` branch in
+// notifyURIWaiters: when a registered notification channel is already full,
+// the send must fall through to default instead of blocking.
+func TestNotifyURIWaitersSkipsFullChannels(t *testing.T) {
+	SetupTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	manager, err := NewSSHTunnelManager(ctx, &SSHConnectionConfig{
+		PrivateKey:        GenerateTestPrivateKey(t),
+		ServerAddress:     "example.com:22",
+		Username:          "testuser",
+		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
+		KeepAliveInterval: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSSHTunnelManager: %v", err)
+	}
+
+	// Register a capacity-1 notification channel and pre-fill it so any send
+	// would block. notifyURIWaiters must skip it via the default branch.
+	full := make(chan []string, 1)
+	full <- []string{"http://placeholder"}
+
+	manager.addrNotifMu.Lock()
+	manager.addrNotifications["test-key"] = full
+	manager.addrNotifMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		manager.notifyURIWaiters([]string{"http://new"})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("notifyURIWaiters blocked instead of skipping a full channel")
+	}
+
+	// The original value must still be in the channel (no overwrite).
+	got := <-full
+	if len(got) != 1 || got[0] != "http://placeholder" {
+		t.Errorf("expected channel to still hold the placeholder, got %v", got)
 	}
 }
