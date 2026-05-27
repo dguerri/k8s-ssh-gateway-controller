@@ -47,7 +47,10 @@ jobs:
           version: latest
 
       - name: Run tests with coverage
-        run: go test -coverprofile=coverage.out -covermode=atomic ./ssh/... ./controllers/...
+        run: |
+          go test -coverprofile=coverage.out -covermode=atomic ./ssh/... ./controllers/...
+          grep -Ev '/ssh/(fakes|testing)\.go:' coverage.out > coverage.filtered.out
+          mv coverage.filtered.out coverage.out
 
       - name: Upload coverage to Coveralls
         uses: coverallsapp/github-action@v2

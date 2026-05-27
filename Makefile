@@ -23,6 +23,8 @@ test-verbose: ## Run tests with verbose output
 test-coverage: ## Run tests with coverage report
 	@echo "Running tests with coverage..."
 	@go test -coverprofile=coverage.out ./ssh/... ./controllers/...
+	@grep -Ev '/ssh/(fakes|testing)\.go:' coverage.out > coverage.filtered.out
+	@mv coverage.filtered.out coverage.out
 	@go tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report generated: coverage.html"
 
