@@ -595,7 +595,7 @@ func (m *SSHTunnelManager) handleAssignedURIs(fwd *ForwardingConfig, key string,
 		slog.With("function", "sendForwarding").Warn("wrong hostname assigned",
 			"requested_host", fwd.RemoteHost, "received_uris", uris)
 		// Cancel by the port the server actually bound, not the one we
-		// requested — cancelling the requested port leaks the random port
+		// requested — canceling the requested port leaks the random port
 		// the server allocated.
 		for _, uri := range uris {
 			if !strings.HasPrefix(uri, "tcp://") {
@@ -841,7 +841,7 @@ func (m *SSHTunnelManager) handleChannels() {
 					}(ch)
 					logger.Debug("forwarding established", "key", key)
 				} else {
-					logger.Warn("unable to find forwarding session, cancelling orphan forwarding on server",
+					logger.Warn("unable to find forwarding session, canceling orphan forwarding on server",
 						"remote_host", payload.Addr, "remote_port", payload.Port)
 					_ = ch.Reject(ssh.ConnectionFailed, "unable to find forwarding session") // #nosec G104 -- Best effort rejection
 

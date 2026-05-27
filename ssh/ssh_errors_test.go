@@ -36,7 +36,7 @@ func TestErrSSHConnectionFailedWithWrappedErr(t *testing.T) {
 	if !errors.Is(err, inner) {
 		t.Errorf("errors.Is(err, inner) = false, want true (Unwrap should expose the inner error)")
 	}
-	if errors.Unwrap(err) != inner {
+	if errors.Unwrap(err) != inner { //nolint:errorlint // intentional identity check on direct Unwrap result
 		t.Errorf("errors.Unwrap returned a different error than the wrapped one")
 	}
 }

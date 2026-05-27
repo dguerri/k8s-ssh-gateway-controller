@@ -1650,7 +1650,7 @@ func TestHandleChannelsClosesBothEndsOnOneSidedEOF(t *testing.T) {
 // TestWrongPortCancelUsesBoundPort verifies that when the SSH server returns a
 // TCP URI bound to a port different from the one we requested
 // (EnforcePort=true), the resulting cancel-tcpip-forward targets the
-// server-bound port rather than the originally-requested port. Cancelling the
+// server-bound port rather than the originally-requested port. Canceling the
 // requested port would leak the random port the server actually bound.
 //
 // Regression: previously handleAssignedURIs sent cancel for fwd.RemotePort,
@@ -2084,7 +2084,7 @@ func TestCancelForwardingLogsOnError(t *testing.T) {
 // TestHandleVerificationTimeoutWildcardReturnsNil covers the warn-only branch
 // of handleVerificationTimeout: when the requested host is a wildcard
 // ("0.0.0.0") and EnforcePort is false, a timeout is non-fatal — the helper
-// logs a warning and returns nil without cancelling.
+// logs a warning and returns nil without canceling.
 func TestHandleVerificationTimeoutWildcardReturnsNil(t *testing.T) {
 	SetupTest(t)
 	ctx, cancel := context.WithCancel(context.Background())
