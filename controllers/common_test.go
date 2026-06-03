@@ -349,6 +349,49 @@ func TestParseProxyProtocol(t *testing.T) {
 	}
 }
 
+func TestParseClassSessionConfig(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		expected    ClassSessionConfig
+	}{
+		{"empty", nil, ClassSessionConfig{}},
+		{"pp v1", map[string]string{annotationProxyProtocol: "1"}, ClassSessionConfig{ProxyProtocolVersion: 1}},
+		{"pp v2", map[string]string{annotationProxyProtocol: "2"}, ClassSessionConfig{ProxyProtocolVersion: 2}},
+		{"pp invalid", map[string]string{annotationProxyProtocol: "9"}, ClassSessionConfig{}},
+		{"sni true", map[string]string{annotationSNIProxy: "true"}, ClassSessionConfig{SNIProxyEnabled: true}},
+		{"sni TRUE case-insensitive", map[string]string{annotationSNIProxy: "TRUE"}, ClassSessionConfig{SNIProxyEnabled: true}},
+		{"sni other value logs and disables", map[string]string{annotationSNIProxy: "yes"}, ClassSessionConfig{}},
+		{"both", map[string]string{
+			annotationProxyProtocol: "2",
+			annotationSNIProxy:      "true",
+		}, ClassSessionConfig{ProxyProtocolVersion: 2, SNIProxyEnabled: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseClassSessionConfig(tt.annotations)
+			if got != tt.expected {
+				t.Fatalf("expected %+v, got %+v", tt.expected, got)
+			}
+		})
+	}
+}
+
+func TestSessionKindString(t *testing.T) {
+	if SessionPlain.String() != "plain" {
+		t.Errorf("expected plain, got %s", SessionPlain.String())
+	}
+	if SessionProxyProto.String() != "pp" {
+		t.Errorf("expected pp, got %s", SessionProxyProto.String())
+	}
+	if SessionSNIProxy.String() != "sni" {
+		t.Errorf("expected sni, got %s", SessionSNIProxy.String())
+	}
+	if SessionKind(99).String() != "unknown" {
+		t.Errorf("expected unknown, got %s", SessionKind(99).String())
+	}
+}
+
 func TestExtractHostnameFromURI(t *testing.T) {
 	tests := []struct {
 		name     string

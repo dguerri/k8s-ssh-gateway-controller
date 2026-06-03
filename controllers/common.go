@@ -17,6 +17,57 @@ import (
 // Annotation key for enabling PROXY protocol on the SSH session.
 // Valid values: "1" (PROXY protocol v1) or "2" (PROXY protocol v2).
 const annotationProxyProtocol = "ssh-gateway.io/proxy-protocol"
+const annotationSNIProxy = "ssh-gateway.io/sni-proxy"
+const annotationListenerProxyProtocolPrefix = "ssh-gateway.io/listener-proxy-protocol."
+
+// SessionKind identifies which SSH session variant is in use.
+type SessionKind int
+
+const (
+	SessionPlain      SessionKind = iota // plain SSH, no wrapping
+	SessionProxyProto                    // PROXY protocol (v1 or v2) prefix
+	SessionSNIProxy                      // TLS SNI proxy front-end
+)
+
+// String returns a short human-readable label for the session kind.
+func (k SessionKind) String() string {
+	switch k {
+	case SessionPlain:
+		return "plain"
+	case SessionProxyProto:
+		return "pp"
+	case SessionSNIProxy:
+		return "sni"
+	default:
+		return "unknown"
+	}
+}
+
+// ClassSessionConfig holds the typed session configuration derived from
+// GatewayClass annotations.
+type ClassSessionConfig struct {
+	ProxyProtocolVersion int  // 0 = disabled, 1 or 2
+	SNIProxyEnabled      bool
+}
+
+// parseClassSessionConfig reads GatewayClass annotations and produces a typed
+// session config. Invalid values log a warning (mirroring parseProxyProtocol)
+// and disable the corresponding session.
+func parseClassSessionConfig(annotations map[string]string) ClassSessionConfig {
+	cfg := ClassSessionConfig{
+		ProxyProtocolVersion: parseProxyProtocol(annotations),
+	}
+	if val, ok := annotations[annotationSNIProxy]; ok && val != "" {
+		if strings.EqualFold(val, "true") {
+			cfg.SNIProxyEnabled = true
+		} else {
+			slog.With("function", "parseClassSessionConfig").Warn(
+				"invalid sni-proxy annotation value, ignoring",
+				"value", val, "valid_values", `"true"`)
+		}
+	}
+	return cfg
+}
 
 // Defaults for SSH connection, can be overridden by environment variables
 const defaultKeyPath = "/ssh/id"
