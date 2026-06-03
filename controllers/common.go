@@ -203,7 +203,8 @@ func createSSHManager(ctx context.Context) (*sshmgr.SSHTunnelManager, error) {
 		ConnectTimeout:    connectTimeout,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: keepAliveInterval,
-		RemoteAddrFunc:    getRemoteAddress,
+		RemoteAddrFunc: getRemoteAddress,
+		SessionLabel:   "plain",
 	}
 
 	return sshmgr.NewSSHTunnelManager(ctx, &sshConfig)

@@ -247,7 +247,6 @@ type mockSSHTunnelManager struct {
 	startForwardingErr   error
 	stopForwardingErr    error
 	connectErr           error
-	proxyProtocolVersion int
 	stopForwardingCalls  []sshmgr.ForwardingConfig
 	startForwardingCalls []sshmgr.ForwardingConfig
 }
@@ -279,10 +278,6 @@ func (m *mockSSHTunnelManager) Connect() error {
 
 func (m *mockSSHTunnelManager) IsConnected() bool {
 	return m.connected
-}
-
-func (m *mockSSHTunnelManager) SetProxyProtocol(version int) {
-	m.proxyProtocolVersion = version
 }
 
 func forwardingKey(hostname string, port int) string {
