@@ -51,6 +51,45 @@ var (
 // returned to ssh server and returns a string containing a uri.
 type ExtractAddrFunc func(string) ([]string, error)
 
+// SessionFlags configures session-level sish behaviour. These flags translate
+// to a single exec command sent on the capture session, e.g. "proxy-protocol=2 sni-proxy=true".
+type SessionFlags struct {
+	ProxyProtocolVersion int  // 0 = disabled, 1 or 2
+	SNIProxy             bool
+}
+
+// execCommand builds the SSH exec command from the flags. The second return is
+// true when the manager should call session.Shell() instead of session.Start(cmd)
+// (i.e. when no flags are set).
+func (f SessionFlags) execCommand() (string, bool) {
+	parts := make([]string, 0, 2)
+	if f.ProxyProtocolVersion > 0 {
+		parts = append(parts, fmt.Sprintf("proxy-protocol=%d", f.ProxyProtocolVersion))
+	}
+	if f.SNIProxy {
+		parts = append(parts, "sni-proxy=true")
+	}
+	if len(parts) == 0 {
+		return "", true
+	}
+	return strings.Join(parts, " "), false
+}
+
+// DefaultLabel returns the canonical slog "session" label for these flags.
+func (f SessionFlags) DefaultLabel() string {
+	switch {
+	case f.SNIProxy:
+		// SNI takes precedence when both flags are set; the pool currently
+		// constructs each manager with only one flag, but the precedence is
+		// part of the public contract.
+		return "sni"
+	case f.ProxyProtocolVersion > 0:
+		return fmt.Sprintf("pp:v%d", f.ProxyProtocolVersion)
+	default:
+		return "plain"
+	}
+}
+
 // SSHConnectionConfig contains configuration for SSH connection.
 type SSHConnectionConfig struct {
 	RemoteAddrFunc             ExtractAddrFunc
@@ -64,6 +103,8 @@ type SSHConnectionConfig struct {
 	FwdReqTimeout              time.Duration
 	KeepAliveInterval          time.Duration
 	AddressVerificationTimeout time.Duration // Optional: timeout for address verification (default: 30s)
+	SessionFlags               SessionFlags
+	SessionLabel               string // optional; if empty, derived from SessionFlags.DefaultLabel()
 }
 
 // ForwardingConfig defines configuration for a single forwarding.
@@ -101,7 +142,8 @@ type SSHTunnelManager struct {
 	clientMu                   sync.RWMutex
 	addrNotifMu                sync.RWMutex
 	captureReady               chan struct{}
-	proxyProtocol              int
+	flags                      SessionFlags
+	log                        *slog.Logger
 	connected                  bool
 }
 
@@ -115,7 +157,7 @@ func forwardingKey(remoteHost string, remotePort int) string {
 func NewSSHTunnelManager(externalCtx context.Context, config *SSHConnectionConfig) (*SSHTunnelManager, error) {
 	signer, err := ssh.ParsePrivateKey(config.PrivateKey)
 	if err != nil {
-		slog.With("function", "NewSSHTunnelManager").Error("unable to parse private key", "error", err)
+		slog.Default().With("function", "NewSSHTunnelManager").Error("unable to parse private key", "error", err)
 		return nil, fmt.Errorf("unable to parse private key: %w", err)
 	}
 
@@ -132,6 +174,11 @@ func NewSSHTunnelManager(externalCtx context.Context, config *SSHConnectionConfi
 	addrVerifyTimeout := config.AddressVerificationTimeout
 	if addrVerifyTimeout == 0 {
 		addrVerifyTimeout = addressVerificationTimeout
+	}
+
+	label := config.SessionLabel
+	if label == "" {
+		label = config.SessionFlags.DefaultLabel()
 	}
 
 	m := &SSHTunnelManager{
@@ -151,6 +198,8 @@ func NewSSHTunnelManager(externalCtx context.Context, config *SSHConnectionConfi
 		addrNotifications:          make(map[string]chan []string),
 		sshDialFunc:                sshDialFn,
 		netDialFunc:                netDialFn,
+		flags:                      config.SessionFlags,
+		log:                        slog.With("session", label),
 	}
 
 	return m, nil
@@ -174,7 +223,7 @@ func (m *SSHTunnelManager) Connect() error {
 	go m.handleChannels()
 	go m.monitorConnection()
 
-	slog.With("function", "Connect").Info("ssh connection established")
+	m.log.With("function", "Connect").Info("ssh connection established")
 	return nil
 }
 
@@ -224,15 +273,15 @@ func (m *SSHTunnelManager) monitorConnection() {
 			select {
 			case result := <-resultCh:
 				if result.err != nil {
-					slog.With("function", "monitorConnection").Error("ssh keepalive failed, closing connection", "error", result.err)
+					m.log.With("function", "monitorConnection").Error("ssh keepalive failed, closing connection", "error", result.err)
 					m.clientMu.Lock()
 					m.closeClient()
 					m.clientMu.Unlock()
 					return
 				}
-				slog.With("function", "monitorConnection").Debug("ssh keepalive sent")
+				m.log.With("function", "monitorConnection").Debug("ssh keepalive sent")
 			case <-time.After(keepaliveTimeout):
-				slog.With("function", "monitorConnection").Error("ssh keepalive timeout, closing connection", "timeout", keepaliveTimeout)
+				m.log.With("function", "monitorConnection").Error("ssh keepalive timeout, closing connection", "timeout", keepaliveTimeout)
 				m.clientMu.Lock()
 				m.closeClient()
 				m.clientMu.Unlock()
@@ -255,7 +304,7 @@ func (m *SSHTunnelManager) closeClient() {
 	}
 	if m.client != nil {
 		if err := m.client.Close(); err != nil {
-			slog.With("function", "disconnect").Error("failed to close SSH client", "error", err)
+			m.log.With("function", "disconnect").Error("failed to close SSH client", "error", err)
 		}
 	}
 	m.client = nil
@@ -288,27 +337,27 @@ func (m *SSHTunnelManager) StartForwarding(fwd ForwardingConfig) error {
 	defer m.clientMu.Unlock()
 
 	if !m.connected || m.client == nil {
-		slog.With("function", "StartForwarding").Warn("client not ready")
+		m.log.With("function", "StartForwarding").Warn("client not ready")
 		return &ErrSSHClientNotReady{}
 	}
 	key := forwardingKey(fwd.RemoteHost, fwd.RemotePort)
 
 	if _, exists := m.forwardings[key]; exists {
 		err := &ErrSSHForwardingExists{Key: key}
-		slog.With("function", "StartForwarding").Error(err.Error())
+		m.log.With("function", "StartForwarding").Error(err.Error())
 		return err
 	}
 
 	err := m.sendForwarding(&fwd, ForwardStart)
 	if err != nil {
-		slog.With("function", "StartForwarding").Error("failed to send forwarding request", "error", err)
+		m.log.With("function", "StartForwarding").Error("failed to send forwarding request", "error", err)
 		return err
 	}
 
 	// Store the forwarding session
 	m.forwardings[key] = &fwd
 
-	slog.With("function", "StartForwarding").Info("started forwarding", "key", key)
+	m.log.With("function", "StartForwarding").Info("started forwarding", "key", key)
 
 	return nil
 }
@@ -325,7 +374,7 @@ func (m *SSHTunnelManager) StopForwarding(fwd *ForwardingConfig) error {
 	forwardingSession, exists := m.forwardings[key]
 	if !exists {
 		err := &ErrSSHForwardingNotFound{Key: key}
-		slog.With("function", "StopForwarding").Warn(err.Error())
+		m.log.With("function", "StopForwarding").Warn(err.Error())
 		return err
 	}
 
@@ -339,11 +388,11 @@ func (m *SSHTunnelManager) StopForwarding(fwd *ForwardingConfig) error {
 
 	err := m.sendForwarding(forwardingSession, ForwardCancel)
 	if err != nil {
-		slog.With("function", "StopForwarding").Error("failed to send cancel request", "error", err)
+		m.log.With("function", "StopForwarding").Error("failed to send cancel request", "error", err)
 		return err
 	}
 
-	slog.With("function", "StopForwarding").Info("stopped forwarding", "key", key)
+	m.log.With("function", "StopForwarding").Info("stopped forwarding", "key", key)
 
 	return nil
 }
@@ -369,34 +418,6 @@ func (m *SSHTunnelManager) IsConnected() bool {
 	m.clientMu.RLock()
 	defer m.clientMu.RUnlock()
 	return m.connected
-}
-
-// SetProxyProtocol sets the PROXY protocol version (0=disabled, 1 or 2).
-// If the version changes and the manager is connected, it disconnects so
-// the next Connect() re-establishes the session with the new setting.
-func (m *SSHTunnelManager) SetProxyProtocol(version int) {
-	m.clientMu.Lock()
-	defer m.clientMu.Unlock()
-
-	if m.proxyProtocol == version {
-		return
-	}
-
-	slog.With("function", "SetProxyProtocol").Info("proxy protocol version changed",
-		"old", m.proxyProtocol, "new", version)
-	m.proxyProtocol = version
-
-	if m.connected {
-		slog.With("function", "SetProxyProtocol").Info("disconnecting to apply new proxy protocol setting")
-		m.closeClient()
-	}
-}
-
-// GetProxyProtocol returns the current PROXY protocol version.
-func (m *SSHTunnelManager) GetProxyProtocol() int {
-	m.clientMu.RLock()
-	defer m.clientMu.RUnlock()
-	return m.proxyProtocol
 }
 
 // ForwardRequest is the type of forwarding request to send.
@@ -485,10 +506,10 @@ func (m *SSHTunnelManager) sendForwarding(fwd *ForwardingConfig, req ForwardRequ
 	// addresses) will be captured. Without this, the server may output
 	// addresses before the Shell session is listening, and they'd be lost.
 	if req == ForwardStart && m.captureReady != nil {
-		slog.With("function", "sendForwarding").Debug("waiting for capture session to be ready")
+		m.log.With("function", "sendForwarding").Debug("waiting for capture session to be ready")
 		select {
 		case <-m.captureReady:
-			slog.With("function", "sendForwarding").Debug("capture session ready, proceeding")
+			m.log.With("function", "sendForwarding").Debug("capture session ready, proceeding")
 		case <-m.connectionCtx.Done():
 			return fmt.Errorf("connection closed while waiting for capture session")
 		}
@@ -573,15 +594,15 @@ func (m *SSHTunnelManager) awaitAssignedAddresses(fwd *ForwardingConfig, key str
 // Must be called with a lock on m.clientMu.
 func (m *SSHTunnelManager) handleVerificationTimeout(fwd *ForwardingConfig, needsVerification bool) error {
 	if needsVerification {
-		slog.With("function", "sendForwarding").Error("timeout waiting for address verification, canceling forwarding",
+		m.log.With("function", "sendForwarding").Error("timeout waiting for address verification, canceling forwarding",
 			"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
 		if cancelErr := m.sendForwardingOnce(fwd, ForwardCancel); cancelErr != nil {
-			slog.With("function", "sendForwarding").Error("failed to cancel forwarding after verification timeout, remote listener may leak",
+			m.log.With("function", "sendForwarding").Error("failed to cancel forwarding after verification timeout, remote listener may leak",
 				"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort, "error", cancelErr)
 		}
 		return fmt.Errorf("timeout waiting for address verification for %s", fwd.RemoteHost)
 	}
-	slog.With("function", "sendForwarding").Warn("timeout waiting for address verification",
+	m.log.With("function", "sendForwarding").Warn("timeout waiting for address verification",
 		"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
 	return nil
 }
@@ -592,7 +613,7 @@ func (m *SSHTunnelManager) handleVerificationTimeout(fwd *ForwardingConfig, need
 // Must be called with a lock on m.clientMu.
 func (m *SSHTunnelManager) handleAssignedURIs(fwd *ForwardingConfig, key string, uris []string, needsVerification bool) error {
 	if needsVerification && !MatchesRequestedHost(uris, fwd.RemoteHost, fwd.RemotePort, fwd.EnforcePort) {
-		slog.With("function", "sendForwarding").Warn("wrong hostname assigned",
+		m.log.With("function", "sendForwarding").Warn("wrong hostname assigned",
 			"requested_host", fwd.RemoteHost, "received_uris", uris)
 		// Cancel by the port the server actually bound, not the one we
 		// requested — canceling the requested port leaks the random port
@@ -609,10 +630,10 @@ func (m *SSHTunnelManager) handleAssignedURIs(fwd *ForwardingConfig, key string,
 	}
 
 	if needsVerification {
-		slog.With("function", "sendForwarding").Info("verified correct hostname assigned",
+		m.log.With("function", "sendForwarding").Info("verified correct hostname assigned",
 			"remote_host", fwd.RemoteHost, "uris", uris)
 	} else {
-		slog.With("function", "sendForwarding").Debug("storing assigned addresses for wildcard forwarding",
+		m.log.With("function", "sendForwarding").Debug("storing assigned addresses for wildcard forwarding",
 			"remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort, "uris", uris)
 	}
 
@@ -630,7 +651,7 @@ func (m *SSHTunnelManager) handleAssignedURIs(fwd *ForwardingConfig, key string,
 func (m *SSHTunnelManager) cancelForwarding(host string, port int, reason string) {
 	fwd := &ForwardingConfig{RemoteHost: host, RemotePort: port}
 	if err := m.sendForwardingOnce(fwd, ForwardCancel); err != nil {
-		slog.With("function", "cancelForwarding").Warn("failed to cancel forwarding on server",
+		m.log.With("function", "cancelForwarding").Warn("failed to cancel forwarding on server",
 			"remote_host", host, "remote_port", port, "reason", reason, "error", err)
 	}
 }
@@ -661,7 +682,7 @@ func (m *SSHTunnelManager) sendForwardingOnce(fwd *ForwardingConfig, req Forward
 		return fmt.Errorf("ssh: unknown forwarding request type: %q", req)
 	}
 
-	slog.With("function", "sendForwardingOnce").Info("sending SSH request",
+	m.log.With("function", "sendForwardingOnce").Info("sending SSH request",
 		"request_type", reqType,
 		"remote_host", fwd.RemoteHost,
 		"remote_port", fwd.RemotePort,
@@ -688,21 +709,21 @@ func (m *SSHTunnelManager) sendForwardingOnce(fwd *ForwardingConfig, req Forward
 
 	select {
 	case <-ctx.Done():
-		slog.With("function", "sendForwardingOnce").Error("request timed out",
+		m.log.With("function", "sendForwardingOnce").Error("request timed out",
 			"request", reqType, "remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
 		return fmt.Errorf("ssh: %s request timed out", reqType)
 	case res := <-resCh:
 		if res.err != nil {
-			slog.With("function", "sendForwardingOnce").Error("request failed with error",
+			m.log.With("function", "sendForwardingOnce").Error("request failed with error",
 				"request", reqType, "remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort, "error", res.err)
 			return res.err
 		}
 		if !res.ok {
-			slog.With("function", "sendForwardingOnce").Error("request denied by server",
+			m.log.With("function", "sendForwardingOnce").Error("request denied by server",
 				"request", reqType, "remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
 			return fmt.Errorf("ssh: %s request denied by server", reqType)
 		}
-		slog.With("function", "sendForwardingOnce").Info("request accepted by server",
+		m.log.With("function", "sendForwardingOnce").Info("request accepted by server",
 			"request", reqType, "remote_host", fwd.RemoteHost, "remote_port", fwd.RemotePort)
 		return nil
 	}
@@ -716,9 +737,9 @@ func (m *SSHTunnelManager) Stop() {
 	if m.client != nil && m.connected {
 		for key, forwardingSession := range m.forwardings {
 			if err := m.sendForwarding(forwardingSession, ForwardCancel); err != nil {
-				slog.With("function", "Stop").Error("failed to stop forwarding", "key", key, "error", err)
+				m.log.With("function", "Stop").Error("failed to stop forwarding", "key", key, "error", err)
 			} else {
-				slog.With("function", "Stop").Info("stopped forwarding", "key", key)
+				m.log.With("function", "Stop").Info("stopped forwarding", "key", key)
 			}
 		}
 	}
@@ -727,7 +748,7 @@ func (m *SSHTunnelManager) Stop() {
 
 	m.closeClient()
 
-	slog.Info("ssh tunnel manager stopped, all forwardings and connections closed")
+	m.log.Info("ssh tunnel manager stopped, all forwardings and connections closed")
 }
 
 // handleChannels manages the lifecycle of a forwarding sessions
@@ -735,7 +756,7 @@ func (m *SSHTunnelManager) handleChannels() {
 	m.clientMu.RLock()
 	if m.client == nil {
 		m.clientMu.RUnlock()
-		slog.With("function", "handleChannels").Error("client is nil, cannot handle channels")
+		m.log.With("function", "handleChannels").Error("client is nil, cannot handle channels")
 		return
 	}
 	tcpipChan := m.client.HandleChannelOpen("forwarded-tcpip")
@@ -746,15 +767,15 @@ func (m *SSHTunnelManager) handleChannels() {
 		// slog.Debug("waiting for new channels")
 		select {
 		case <-connectionCtx.Done():
-			slog.With("function", "handleChannels").Debug("connection context canceled, stopping channel handling")
+			m.log.With("function", "handleChannels").Debug("connection context canceled, stopping channel handling")
 			return
 		case ch := <-tcpipChan:
 			if ch == nil {
-				slog.With("function", "handleChannels").Debug("received nil channel, stopping channel handling")
+				m.log.With("function", "handleChannels").Debug("received nil channel, stopping channel handling")
 				return
 			}
 
-			logger := slog.With(
+			logger := m.log.With(
 				slog.String("channel_type", ch.ChannelType()),
 				slog.String("extra_data", string(ch.ExtraData())),
 			)
@@ -822,7 +843,7 @@ func (m *SSHTunnelManager) handleChannels() {
 							go func() {
 								defer wg.Done()
 								n, err := io.Copy(remoteConn, localConn)
-								slog.With("function", "handleChannels").Debug("copied data from local to remote", "bytes", n, "error", err)
+								m.log.With("function", "handleChannels").Debug("copied data from local to remote", "bytes", n, "error", err)
 								_ = remoteConn.Close() // #nosec G104 -- Best effort close
 								_ = localConn.Close()  // #nosec G104 -- Best effort close
 							}()
@@ -830,13 +851,13 @@ func (m *SSHTunnelManager) handleChannels() {
 							go func() {
 								defer wg.Done()
 								n, err := io.Copy(localConn, remoteConn)
-								slog.With("function", "handleChannels").Debug("copied data from remote to local", "bytes", n, "error", err)
+								m.log.With("function", "handleChannels").Debug("copied data from remote to local", "bytes", n, "error", err)
 								_ = localConn.Close()  // #nosec G104 -- Best effort close
 								_ = remoteConn.Close() // #nosec G104 -- Best effort close
 							}()
 
 							wg.Wait()
-							slog.With("function", "handleChannels").Debug("channel closed")
+							m.log.With("function", "handleChannels").Debug("channel closed")
 						}()
 					}(ch)
 					logger.Debug("forwarding established", "key", key)
@@ -890,7 +911,7 @@ func (m *SSHTunnelManager) connectClient() error {
 			actualFingerprint := "SHA256:" + base64.StdEncoding.EncodeToString(actual[:])
 
 			if actualFingerprint != m.hostKey {
-				slog.With("function", "connect").Error("host key verification failed", "expected", m.hostKey, "got", actualFingerprint)
+				m.log.With("function", "connect").Error("host key verification failed", "expected", m.hostKey, "got", actualFingerprint)
 				return fmt.Errorf("host key verification failed: expected %s, got %s", m.hostKey, actualFingerprint)
 			}
 			return nil
@@ -901,14 +922,14 @@ func (m *SSHTunnelManager) connectClient() error {
 		// 2. This is typically used for development/testing environments
 		// 3. We log a warning to make the user aware of the security implication
 		// For production use, SSH_HOST_KEY should always be set
-		slog.With("function", "connect").Warn("no host key provided, falling back to InsecureIgnoreHostKey")
+		m.log.With("function", "connect").Warn("no host key provided, falling back to InsecureIgnoreHostKey")
 		config.HostKeyCallback = ssh.InsecureIgnoreHostKey() // #nosec G106 -- Intentional fallback for dev/test
 	}
 
 	client, err := m.sshDialFunc("tcp", m.sshServerAddress, config)
 	if err != nil {
 		rerr := &ErrSSHConnectionFailed{Err: err}
-		slog.With("function", "connect").Error(rerr.Error())
+		m.log.With("function", "connect").Error(rerr.Error())
 		return rerr
 	}
 
@@ -921,9 +942,10 @@ func (m *SSHTunnelManager) connectClient() error {
 	// caused it — including SSH_MSG_DISCONNECT reason strings from the server,
 	// which are otherwise hidden behind the EOF surfaced to SendRequest.
 	if real, ok := client.(*ssh.Client); ok {
+		log := m.log
 		go func() {
 			err := real.Wait()
-			slog.With("function", "monitorClientWait").Info("ssh client transport shut down", "error", err)
+			log.With("function", "monitorClientWait").Info("ssh client transport shut down", "error", err)
 		}()
 	}
 
@@ -932,10 +954,10 @@ func (m *SSHTunnelManager) connectClient() error {
 	// ensuring the Shell session is listening when the server outputs addresses.
 	m.captureReady = make(chan struct{})
 	if m.remoteAddrFunc == nil {
-		slog.With("function", "connect").Debug("remoteAddrFunc is not set, skipping server output capture")
+		m.log.With("function", "connect").Debug("remoteAddrFunc is not set, skipping server output capture")
 		close(m.captureReady)
 	} else {
-		slog.With("function", "connect").Debug("remoteAddrFunc is set, capturing server output")
+		m.log.With("function", "connect").Debug("remoteAddrFunc is set, capturing server output")
 		go m.captureServerOutput()
 	}
 
@@ -961,19 +983,19 @@ func (m *SSHTunnelManager) captureServerOutput() {
 	}
 	defer func() {
 		if err := session.Close(); err != nil {
-			slog.With("function", "captureServerOutput").Error("failed to close session", "error", err)
+			m.log.With("function", "captureServerOutput").Error("failed to close session", "error", err)
 		}
 	}()
 
 	stdout, err := session.StdoutPipe()
 	if err != nil {
-		slog.With("function", "captureServerOutput").Error("failed to get stdout pipe", "error", err)
+		m.log.With("function", "captureServerOutput").Error("failed to get stdout pipe", "error", err)
 		return
 	}
 
 	stderr, err := session.StderrPipe()
 	if err != nil {
-		slog.With("function", "captureServerOutput").Error("failed to get stderr pipe", "error", err)
+		m.log.With("function", "captureServerOutput").Error("failed to get stderr pipe", "error", err)
 		return
 	}
 
@@ -985,21 +1007,18 @@ func (m *SSHTunnelManager) captureServerOutput() {
 
 	close(m.captureReady)
 	captureSignaled = true
-	slog.With("function", "captureServerOutput").Debug("capture session ready")
+	m.log.With("function", "captureServerOutput").Debug("capture session ready")
 
-	if m.proxyProtocol > 0 {
-		// Send proxy-protocol as an exec command on this same session.
-		// Equivalent to `ssh server proxy-protocol=N`. The server outputs
-		// forwarding addresses on this session's stdout/stderr.
-		cmd := fmt.Sprintf("proxy-protocol=%d", m.proxyProtocol)
-		slog.With("function", "captureServerOutput").Info("starting session with proxy protocol", "command", cmd)
-		if err := session.Start(cmd); err != nil {
-			slog.With("function", "captureServerOutput").Error("failed to start proxy protocol session", "error", err)
+	cmd, useShell := m.flags.execCommand()
+	if useShell {
+		if err := session.Shell(); err != nil {
+			m.log.With("function", "captureServerOutput").Error("failed to start remote session", "error", err)
 			return
 		}
 	} else {
-		if err := session.Shell(); err != nil {
-			slog.With("function", "captureServerOutput").Error("failed to start remote session", "error", err)
+		m.log.With("function", "captureServerOutput").Info("starting session with flags", "command", cmd)
+		if err := session.Start(cmd); err != nil {
+			m.log.With("function", "captureServerOutput").Error("failed to start flagged session", "error", err)
 			return
 		}
 	}
@@ -1012,13 +1031,13 @@ func (m *SSHTunnelManager) captureServerOutput() {
 func (m *SSHTunnelManager) createSSHSession() (*ssh.Session, error) {
 	realClient, ok := m.client.(*ssh.Client)
 	if !ok {
-		slog.With("function", "captureServerOutput").Warn("cannot capture server output, client is not *ssh.Client")
+		m.log.With("function", "captureServerOutput").Warn("cannot capture server output, client is not *ssh.Client")
 		return nil, fmt.Errorf("client is not *ssh.Client")
 	}
 
 	session, err := realClient.NewSession()
 	if err != nil {
-		slog.With("function", "captureServerOutput").Error("failed to create SSH session", "error", err)
+		m.log.With("function", "captureServerOutput").Error("failed to create SSH session", "error", err)
 		return nil, err
 	}
 
@@ -1031,13 +1050,13 @@ func (m *SSHTunnelManager) readServerOutput(reader io.Reader, streamName string)
 	for {
 		select {
 		case <-m.connectionCtx.Done():
-			slog.With("function", "captureServerOutput").Debug("connection context canceled, stopping server output capture")
+			m.log.With("function", "captureServerOutput").Debug("connection context canceled, stopping server output capture")
 			return
 		default:
 			n, err := reader.Read(buf)
 			if err != nil {
 				if err != io.EOF {
-					slog.With("function", "captureServerOutput", "stream", streamName).Error("read error", "error", err)
+					m.log.With("function", "captureServerOutput", "stream", streamName).Error("read error", "error", err)
 				}
 				return
 			}
@@ -1051,11 +1070,11 @@ func (m *SSHTunnelManager) readServerOutput(reader io.Reader, streamName string)
 // processServerData extracts URIs from server output and notifies waiting goroutines.
 func (m *SSHTunnelManager) processServerData(data []byte, streamName string) {
 	dataStr := string(data)
-	slog.With("function", "captureServerOutput", "stream", streamName).Debug(dataStr)
+	m.log.With("function", "captureServerOutput", "stream", streamName).Debug(dataStr)
 
 	uris, err := m.remoteAddrFunc(dataStr)
 	if err != nil {
-		slog.With("function", "captureServerOutput", "stream", streamName).Error("failed to extract URIs from data", "error", err)
+		m.log.With("function", "captureServerOutput", "stream", streamName).Error("failed to extract URIs from data", "error", err)
 		return
 	}
 
@@ -1063,9 +1082,9 @@ func (m *SSHTunnelManager) processServerData(data []byte, streamName string) {
 		return
 	}
 
-	slog.With("function", "captureServerOutput", "stream", streamName).Debug("extracted URIs from server output", "uris_count", len(uris))
+	m.log.With("function", "captureServerOutput", "stream", streamName).Debug("extracted URIs from server output", "uris_count", len(uris))
 	for _, uri := range uris {
-		slog.With("function", "captureServerOutput", "stream", streamName).Info("extracted URI from server output", "uri", uri)
+		m.log.With("function", "captureServerOutput", "stream", streamName).Info("extracted URI from server output", "uri", uri)
 	}
 
 	m.notifyURIWaiters(uris)
@@ -1085,7 +1104,7 @@ func (m *SSHTunnelManager) notifyURIWaiters(uris []string) {
 	for key, ch := range channels {
 		select {
 		case ch <- uris:
-			slog.With("function", "captureServerOutput").Debug("notified waiter about addresses", "key", key, "uris", uris)
+			m.log.With("function", "captureServerOutput").Debug("notified waiter about addresses", "key", key, "uris", uris)
 		default:
 			// Channel full or no receiver, skip
 		}

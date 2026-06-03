@@ -87,7 +87,6 @@ type SSHTunnelManagerInterface interface {
 	Stop()
 	Connect() error
 	IsConnected() bool
-	SetProxyProtocol(version int)
 }
 
 type GatewayReconciler struct {
@@ -432,13 +431,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	// Apply proxy protocol setting from GatewayClass annotation
-	proxyProtocol := parseProxyProtocol(gc.Annotations)
-	if proxyProtocol > 0 {
-		slog.With("function", "Reconcile").Debug("proxy protocol enabled from GatewayClass",
-			"gatewayClass", gc.Name, "version", proxyProtocol)
-	}
-	r.manager.SetProxyProtocol(proxyProtocol)
+	// TODO(task-6): Session configuration is applied via the pool — see Task 6.
 
 	// Handle add or update
 	slog.With("function", "Reconcile", "gateway", req.NamespacedName).Debug("adding or updating gateway")
