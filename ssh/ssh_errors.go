@@ -25,6 +25,16 @@ func (e *ErrSSHForwardingNotFound) Error() string {
 	return "forwarding not found: " + e.Key
 }
 
+// ErrSessionNotEnabled indicates a pool operation requested a session kind
+// that is not currently open.
+type ErrSessionNotEnabled struct {
+	Kind string
+}
+
+func (e *ErrSessionNotEnabled) Error() string {
+	return "session not enabled: " + e.Kind
+}
+
 // ErrSSHConnectionFailed indicates the SSH connection failed.
 // It wraps the underlying error for proper error chain handling.
 type ErrSSHConnectionFailed struct {

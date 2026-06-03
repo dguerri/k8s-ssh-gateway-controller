@@ -50,3 +50,18 @@ func TestErrSSHConnectionFailedWithNilErr(t *testing.T) {
 		t.Errorf("errors.Unwrap on nil-wrapped ErrSSHConnectionFailed should return nil")
 	}
 }
+
+func TestErrSessionNotEnabled(t *testing.T) {
+	err := &ErrSessionNotEnabled{Kind: "pp"}
+	if err.Error() != "session not enabled: pp" {
+		t.Fatalf("unexpected message: %s", err.Error())
+	}
+
+	var target *ErrSessionNotEnabled
+	if !errors.As(err, &target) {
+		t.Fatal("errors.As should match")
+	}
+	if target.Kind != "pp" {
+		t.Fatalf("expected Kind=pp, got %s", target.Kind)
+	}
+}
