@@ -230,6 +230,25 @@ func parseProxyProtocol(annotations map[string]string) int {
 	return version
 }
 
+// parseListenerProxyProtocol returns true iff the Gateway carries the
+// ssh-gateway.io/listener-proxy-protocol.<listenerName> annotation set to "true"
+// (case-insensitive). Any other non-empty value logs a warning and is treated
+// as absent.
+func parseListenerProxyProtocol(annotations map[string]string, listenerName string) bool {
+	key := annotationListenerProxyProtocolPrefix + listenerName
+	val, ok := annotations[key]
+	if !ok || val == "" {
+		return false
+	}
+	if strings.EqualFold(val, "true") {
+		return true
+	}
+	slog.With("function", "parseListenerProxyProtocol").Warn(
+		"invalid listener-proxy-protocol annotation value, ignoring",
+		"listener", listenerName, "value", val, "valid_values", "true")
+	return false
+}
+
 // getRemoteAddress extracts remote addresses from the input string using regex.
 // pico.sh TCP and HTTP(S) URIs are supported.
 // localhost.run HTTPS URIs are supported

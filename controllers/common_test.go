@@ -392,6 +392,29 @@ func TestSessionKindString(t *testing.T) {
 	}
 }
 
+func TestParseListenerProxyProtocol(t *testing.T) {
+	tests := []struct {
+		name         string
+		annotations  map[string]string
+		listenerName string
+		expected     bool
+	}{
+		{"absent", nil, "tcp-listener", false},
+		{"true", map[string]string{annotationListenerProxyProtocolPrefix + "tcp-pp": "true"}, "tcp-pp", true},
+		{"TRUE case-insensitive", map[string]string{annotationListenerProxyProtocolPrefix + "tcp-pp": "TRUE"}, "tcp-pp", true},
+		{"other value logs warning", map[string]string{annotationListenerProxyProtocolPrefix + "tcp-pp": "yes"}, "tcp-pp", false},
+		{"different listener absent", map[string]string{annotationListenerProxyProtocolPrefix + "other": "true"}, "tcp-pp", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseListenerProxyProtocol(tt.annotations, tt.listenerName)
+			if got != tt.expected {
+				t.Fatalf("expected %v, got %v", tt.expected, got)
+			}
+		})
+	}
+}
+
 func TestExtractHostnameFromURI(t *testing.T) {
 	tests := []struct {
 		name     string
