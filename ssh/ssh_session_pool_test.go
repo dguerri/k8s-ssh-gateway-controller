@@ -31,9 +31,9 @@ func (s *stubManager) StopForwarding(c *ForwardingConfig) error {
 	return s.stopForwardingErr
 }
 func (s *stubManager) GetAssignedAddresses(h string, p int) []string { return nil }
-func (s *stubManager) IsConnected() bool                              { return s.connected }
-func (s *stubManager) Stop()                                          { s.mu.Lock(); s.stopCalls++; s.mu.Unlock() }
-func (s *stubManager) Connect() error                                 { s.connected = true; return nil }
+func (s *stubManager) IsConnected() bool                             { return s.connected }
+func (s *stubManager) Stop()                                         { s.mu.Lock(); s.stopCalls++; s.mu.Unlock() }
+func (s *stubManager) Connect() error                                { s.connected = true; return nil }
 
 // newTestPool wires up the pool with a stub-producing factory.
 func newTestPool() (*SSHSessionPool, *stubManager, map[SessionFlags]*stubManager) {
@@ -195,7 +195,7 @@ func TestSessionKindString_PoolPackage(t *testing.T) {
 }
 
 // newTestPoolWithFactory wires up a pool around a caller-provided factory,
-// useful when a test needs control over the per-call factory behaviour
+// useful when a test needs control over the per-call factory behavior
 // (e.g. simulating a Connect failure on a specific kind).
 func newTestPoolWithFactory(t *testing.T, factory managerFactory) *SSHSessionPool {
 	t.Helper()
@@ -311,11 +311,11 @@ type failingConnectStub struct {
 	connectCalls int
 }
 
-func (s *failingConnectStub) StartForwarding(ForwardingConfig) error  { return nil }
-func (s *failingConnectStub) StopForwarding(*ForwardingConfig) error  { return nil }
+func (s *failingConnectStub) StartForwarding(ForwardingConfig) error    { return nil }
+func (s *failingConnectStub) StopForwarding(*ForwardingConfig) error    { return nil }
 func (s *failingConnectStub) GetAssignedAddresses(string, int) []string { return nil }
-func (s *failingConnectStub) IsConnected() bool                       { return false }
-func (s *failingConnectStub) Stop()                                   {}
+func (s *failingConnectStub) IsConnected() bool                         { return false }
+func (s *failingConnectStub) Stop()                                     {}
 func (s *failingConnectStub) Connect() error {
 	s.connectCalls++
 	return errors.New("connect refused")
@@ -328,11 +328,11 @@ type reconnectStub struct {
 	connectCallsAfterCtor int
 }
 
-func (s *reconnectStub) StartForwarding(ForwardingConfig) error  { return nil }
-func (s *reconnectStub) StopForwarding(*ForwardingConfig) error  { return nil }
+func (s *reconnectStub) StartForwarding(ForwardingConfig) error    { return nil }
+func (s *reconnectStub) StopForwarding(*ForwardingConfig) error    { return nil }
 func (s *reconnectStub) GetAssignedAddresses(string, int) []string { return nil }
-func (s *reconnectStub) IsConnected() bool                       { return s.connected }
-func (s *reconnectStub) Stop()                                   {}
+func (s *reconnectStub) IsConnected() bool                         { return s.connected }
+func (s *reconnectStub) Stop()                                     {}
 func (s *reconnectStub) Connect() error {
 	s.connectCallsAfterCtor++
 	s.connected = true

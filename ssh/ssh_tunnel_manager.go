@@ -51,10 +51,10 @@ var (
 // returned to ssh server and returns a string containing a uri.
 type ExtractAddrFunc func(string) ([]string, error)
 
-// SessionFlags configures session-level sish behaviour. These flags translate
+// SessionFlags configures session-level sish behavior. These flags translate
 // to a single exec command sent on the capture session, e.g. "proxy-protocol=2 sni-proxy=true".
 type SessionFlags struct {
-	ProxyProtocolVersion int  // 0 = disabled, 1 or 2
+	ProxyProtocolVersion int // 0 = disabled, 1 or 2
 	SNIProxy             bool
 }
 

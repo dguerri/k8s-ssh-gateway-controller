@@ -7,7 +7,7 @@ import (
 	"sync"
 )
 
-// SessionKind enumerates the sish session flavours the pool may open.
+// SessionKind enumerates the sish session flavors the pool may open.
 // Mirrors controllers.SessionKind; the pool exposes its own enum so the ssh/
 // package can stay self-contained.
 type SessionKind int
