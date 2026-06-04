@@ -12,6 +12,7 @@ import (
 
 	sshmgr "github.com/dguerri/k8s-ssh-gateway-controller/ssh"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 )
 
 // Annotation key for enabling PROXY protocol on the SSH session.
@@ -164,6 +165,10 @@ func getTCPRouteFinalizer() string {
 	return "tcproute.gateway.networking.k8s.io/finalizer-" + controllerNameSuffix()
 }
 
+func getTLSRouteFinalizer() string {
+	return "tlsroute.gateway.networking.k8s.io/finalizer-" + controllerNameSuffix()
+}
+
 func getGatewayFinalizer() string {
 	return "gateway.networking.k8s.io/finalizer-" + controllerNameSuffix()
 }
@@ -234,6 +239,69 @@ func createSSHSessionPool(ctx context.Context) (*sshmgr.SSHSessionPool, error) {
 
 func getSvcHostname(svcName, svcNamespace string) string {
 	return fmt.Sprintf("%s.%s.svc.cluster.local", svcName, svcNamespace)
+}
+
+// extractTLSRouteDetails extracts common route details from a TLSRoute resource.
+// Identical shape to extractTCPRouteDetails — kept separate because the kind differs.
+func extractTLSRouteDetails(k8sRoute *gatewayv1alpha2.TLSRoute) (*routeDetails, error) {
+	if len(k8sRoute.Spec.ParentRefs) < 1 {
+		return nil, fmt.Errorf("TLSRoute %s/%s must have at least one ParentRef", k8sRoute.Namespace, k8sRoute.Name)
+	}
+	if len(k8sRoute.Spec.ParentRefs) > 1 {
+		slog.With("route", fmt.Sprintf("%s/%s", k8sRoute.Namespace, k8sRoute.Name)).
+			Debug("TLSRoute has more than one ParentRef, only the first will be used")
+	}
+	parent := k8sRoute.Spec.ParentRefs[0]
+
+	if parent.Name == "" {
+		return nil, fmt.Errorf("ParentRef name is empty for TLSRoute %s/%s", k8sRoute.Namespace, k8sRoute.Name)
+	}
+
+	parentNamespace := k8sRoute.Namespace
+	if parent.Namespace != nil {
+		parentNamespace = string(*parent.Namespace)
+	}
+
+	if parent.SectionName == nil {
+		return nil, fmt.Errorf("ParentRef sectionName is nil for TLSRoute %s/%s", k8sRoute.Namespace, k8sRoute.Name)
+	}
+
+	if len(k8sRoute.Spec.Rules) < 1 {
+		return nil, fmt.Errorf("TLSRoute %s/%s must have at least one Rule", k8sRoute.Namespace, k8sRoute.Name)
+	}
+	rule := k8sRoute.Spec.Rules[0]
+
+	if len(rule.BackendRefs) < 1 {
+		return nil, fmt.Errorf("TLSRoute %s/%s must have at least one BackendRef", k8sRoute.Namespace, k8sRoute.Name)
+	}
+	k8Svc := rule.BackendRefs[0]
+
+	if k8Svc.Name == "" {
+		return nil, fmt.Errorf("BackendRef name is empty for TLSRoute %s/%s", k8sRoute.Namespace, k8sRoute.Name)
+	}
+
+	if k8Svc.Port == nil {
+		return nil, fmt.Errorf("BackendRef port is nil for TLSRoute %s/%s", k8sRoute.Namespace, k8sRoute.Name)
+	}
+
+	if k8sRoute.Namespace == "" {
+		return nil, fmt.Errorf("TLSRoute namespace is nil or empty for TLSRoute %s", k8sRoute.Name)
+	}
+
+	backendNamespace := k8sRoute.Namespace
+	if k8Svc.Namespace != nil {
+		backendNamespace = string(*k8Svc.Namespace)
+	}
+
+	return &routeDetails{
+		routeName:      string(k8sRoute.Name),
+		routeNamespace: string(k8sRoute.Namespace),
+		gwName:         string(parent.Name),
+		gwNamespace:    parentNamespace,
+		listenerName:   string(*parent.SectionName),
+		backendHost:    getSvcHostname(string(k8Svc.Name), backendNamespace),
+		backendPort:    int(*k8Svc.Port),
+	}, nil
 }
 
 // parseProxyProtocol parses the proxy-protocol annotation value.
