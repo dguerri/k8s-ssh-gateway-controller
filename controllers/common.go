@@ -241,67 +241,103 @@ func getSvcHostname(svcName, svcNamespace string) string {
 	return fmt.Sprintf("%s.%s.svc.cluster.local", svcName, svcNamespace)
 }
 
-// extractTLSRouteDetails extracts common route details from a TLSRoute resource.
-// Identical shape to extractTCPRouteDetails — kept separate because the kind differs.
-func extractTLSRouteDetails(k8sRoute *gatewayv1alpha2.TLSRoute) (*routeDetails, error) {
-	if len(k8sRoute.Spec.ParentRefs) < 1 {
-		return nil, fmt.Errorf("TLSRoute %s/%s must have at least one ParentRef", k8sRoute.Namespace, k8sRoute.Name)
+// extractRouteDetailsFromParts factors the validation shared by
+// extractTCPRouteDetails and extractTLSRouteDetails. kind is the route Kind
+// (e.g. "TCPRoute", "TLSRoute") used in error and log messages. ruleCount is
+// len(route.Spec.Rules); the caller has already pulled BackendRefs off Rules[0].
+func extractRouteDetailsFromParts(
+	kind string,
+	routeNS string,
+	routeName string,
+	parentRefs []gatewayv1.ParentReference,
+	ruleCount int,
+	backendRefs []gatewayv1.BackendRef,
+) (*routeDetails, error) {
+	routeKey := fmt.Sprintf("%s/%s", routeNS, routeName)
+	log := slog.With("kind", kind, "route", routeKey)
+
+	if len(parentRefs) < 1 {
+		return nil, fmt.Errorf("%s %s must have at least one ParentRef", kind, routeKey)
 	}
-	if len(k8sRoute.Spec.ParentRefs) > 1 {
-		slog.With("route", fmt.Sprintf("%s/%s", k8sRoute.Namespace, k8sRoute.Name)).
-			Debug("TLSRoute has more than one ParentRef, only the first will be used")
+	if len(parentRefs) > 1 {
+		log.Debug("route has more than one ParentRef, only the first will be used")
 	}
-	parent := k8sRoute.Spec.ParentRefs[0]
+	parent := parentRefs[0]
 
 	if parent.Name == "" {
-		return nil, fmt.Errorf("ParentRef name is empty for TLSRoute %s/%s", k8sRoute.Namespace, k8sRoute.Name)
+		return nil, fmt.Errorf("ParentRef name is empty for %s %s", kind, routeKey)
 	}
 
-	parentNamespace := k8sRoute.Namespace
+	parentNamespace := routeNS
 	if parent.Namespace != nil {
 		parentNamespace = string(*parent.Namespace)
+	} else {
+		log.Debug("ParentRef namespace is nil, defaulting to route namespace")
 	}
 
 	if parent.SectionName == nil {
-		return nil, fmt.Errorf("ParentRef sectionName is nil for TLSRoute %s/%s", k8sRoute.Namespace, k8sRoute.Name)
+		return nil, fmt.Errorf("ParentRef sectionName is nil for %s %s", kind, routeKey)
 	}
 
-	if len(k8sRoute.Spec.Rules) < 1 {
-		return nil, fmt.Errorf("TLSRoute %s/%s must have at least one Rule", k8sRoute.Namespace, k8sRoute.Name)
+	if ruleCount < 1 {
+		return nil, fmt.Errorf("%s %s must have at least one Rule", kind, routeKey)
 	}
-	rule := k8sRoute.Spec.Rules[0]
+	if ruleCount > 1 {
+		log.Debug("route has more than one Rule, only the first will be used")
+	}
 
-	if len(rule.BackendRefs) < 1 {
-		return nil, fmt.Errorf("TLSRoute %s/%s must have at least one BackendRef", k8sRoute.Namespace, k8sRoute.Name)
+	if len(backendRefs) < 1 {
+		return nil, fmt.Errorf("%s %s must have at least one BackendRef", kind, routeKey)
 	}
-	k8Svc := rule.BackendRefs[0]
+	if len(backendRefs) > 1 {
+		log.Debug("Rule has more than one BackendRef, only the first will be used")
+	}
+	k8Svc := backendRefs[0]
 
 	if k8Svc.Name == "" {
-		return nil, fmt.Errorf("BackendRef name is empty for TLSRoute %s/%s", k8sRoute.Namespace, k8sRoute.Name)
+		return nil, fmt.Errorf("BackendRef name is empty for %s %s", kind, routeKey)
 	}
 
 	if k8Svc.Port == nil {
-		return nil, fmt.Errorf("BackendRef port is nil for TLSRoute %s/%s", k8sRoute.Namespace, k8sRoute.Name)
+		return nil, fmt.Errorf("BackendRef port is nil for %s %s", kind, routeKey)
 	}
 
-	if k8sRoute.Namespace == "" {
-		return nil, fmt.Errorf("TLSRoute namespace is nil or empty for TLSRoute %s", k8sRoute.Name)
+	if routeNS == "" {
+		return nil, fmt.Errorf("%s namespace is nil or empty for %s %s", kind, kind, routeName)
 	}
 
-	backendNamespace := k8sRoute.Namespace
+	backendNamespace := routeNS
 	if k8Svc.Namespace != nil {
 		backendNamespace = string(*k8Svc.Namespace)
+	} else {
+		log.Debug("BackendRef namespace is nil, defaulting to route namespace")
 	}
 
 	return &routeDetails{
-		routeName:      string(k8sRoute.Name),
-		routeNamespace: string(k8sRoute.Namespace),
+		routeName:      routeName,
+		routeNamespace: routeNS,
 		gwName:         string(parent.Name),
 		gwNamespace:    parentNamespace,
 		listenerName:   string(*parent.SectionName),
 		backendHost:    getSvcHostname(string(k8Svc.Name), backendNamespace),
 		backendPort:    int(*k8Svc.Port),
 	}, nil
+}
+
+// extractTLSRouteDetails extracts common route details from a TLSRoute resource.
+func extractTLSRouteDetails(k8sRoute *gatewayv1alpha2.TLSRoute) (*routeDetails, error) {
+	var backendRefs []gatewayv1.BackendRef
+	if len(k8sRoute.Spec.Rules) > 0 {
+		backendRefs = k8sRoute.Spec.Rules[0].BackendRefs
+	}
+	return extractRouteDetailsFromParts(
+		"TLSRoute",
+		k8sRoute.Namespace,
+		k8sRoute.Name,
+		k8sRoute.Spec.ParentRefs,
+		len(k8sRoute.Spec.Rules),
+		backendRefs,
+	)
 }
 
 // parseProxyProtocol parses the proxy-protocol annotation value.
