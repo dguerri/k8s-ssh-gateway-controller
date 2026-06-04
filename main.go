@@ -61,6 +61,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	tlsRecon := &controllers.TLSRouteReconciler{
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		GatewayReconciler: gwRecon,
+	}
+	if err = tlsRecon.SetupWithManager(mgr); err != nil {
+		slog.Error("unable to create TLSRoute controller", "error", err)
+		os.Exit(1)
+	}
+
 	slog.Info("starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		slog.Error("problem running manager", "error", err)
