@@ -29,3 +29,10 @@ func TestSetupScheme(t *testing.T) {
 		t.Error("SetupScheme() returned nil")
 	}
 }
+
+func TestSetupScheme_RegistersTLSRoute(t *testing.T) {
+	s := SetupScheme()
+	if !s.Recognizes(gatewayv1alpha2.SchemeGroupVersion.WithKind("TLSRoute")) {
+		t.Fatal("TLSRoute should be registered in the scheme")
+	}
+}
