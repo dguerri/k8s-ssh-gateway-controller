@@ -6,3 +6,5 @@ gateway-controller
 publish.sh
 deploy.sh
 .claude
+docs/superpowers/
+docs/agents/
