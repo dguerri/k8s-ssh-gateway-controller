@@ -376,32 +376,33 @@ func parseListenerProxyProtocol(annotations map[string]string, listenerName stri
 	return false
 }
 
+// remoteAddressPatterns holds the precompiled regexes used by getRemoteAddress.
+// Compiled at package init so the per-chunk hot path on SSH stdout/stderr does
+// not pay regexp.MustCompile + GC cost on every invocation.
+var remoteAddressPatterns = map[string][]*regexp.Regexp{
+	"tcp": {
+		regexp.MustCompile(`TCP\x1b\[0m:\s+([\w\.-]+:\d+)\r`),
+		regexp.MustCompile(`Forwarding TCP traffic from ([\w\.-]+:\d+)`),
+	},
+	"http": {
+		regexp.MustCompile(`HTTP\x1b\[0m:\s+(http://[\w\.-]+)\r`),
+		regexp.MustCompile(`Forwarding HTTP traffic from (http://[\w\.-]+)`),
+	},
+	"https": {
+		regexp.MustCompile(`HTTPS\x1b\[0m:\s+(https://[\w\.-]+)\r`),
+		regexp.MustCompile(`tunneled with tls termination, (https://[\w\.-]+)`),
+		regexp.MustCompile(`Forwarding HTTP traffic from (https://[\w\.-]+)`),
+	},
+}
+
 // getRemoteAddress extracts remote addresses from the input string using regex.
 // pico.sh TCP and HTTP(S) URIs are supported.
 // localhost.run HTTPS URIs are supported
 // serveo.net TCP and HTTP(S) URIs are supported
 func getRemoteAddress(input string) ([]string, error) {
 	var results []string
-
-	patterns := map[string][]string{
-		"tcp": {
-			`TCP\x1b\[0m:\s+([\w\.-]+:\d+)\r`,
-			`Forwarding TCP traffic from ([\w\.-]+:\d+)`,
-		},
-		"http": {
-			`HTTP\x1b\[0m:\s+(http://[\w\.-]+)\r`,
-			`Forwarding HTTP traffic from (http://[\w\.-]+)`,
-		},
-		"https": {
-			`HTTPS\x1b\[0m:\s+(https://[\w\.-]+)\r`,
-			`tunneled with tls termination, (https://[\w\.-]+)`,
-			`Forwarding HTTP traffic from (https://[\w\.-]+)`,
-		},
-	}
-
-	for scheme, pats := range patterns {
-		for _, pattern := range pats {
-			re := regexp.MustCompile(pattern)
+	for scheme, pats := range remoteAddressPatterns {
+		for _, re := range pats {
 			matches := re.FindAllStringSubmatch(input, -1)
 			for _, match := range matches {
 				if len(match) > 1 {
@@ -414,6 +415,5 @@ func getRemoteAddress(input string) ([]string, error) {
 			}
 		}
 	}
-
 	return results, nil
 }
