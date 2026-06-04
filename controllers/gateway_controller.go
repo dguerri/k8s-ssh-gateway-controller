@@ -72,6 +72,13 @@ type Listener struct {
 	Protocol string
 	Hostname string
 	Port     int
+	// SessionKind identifies which SSH session variant handles this listener.
+	SessionKind sshmgr.SessionKind
+	// Rejected is set when the listener cannot be programmed (e.g. unsupported
+	// protocol, unsupported TLS mode, or required session not enabled). Reason
+	// holds the condition reason to surface on the Gateway listener status.
+	Rejected bool
+	Reason   string // one of: SessionNotEnabled, UnsupportedTLSMode, UnsupportedListenerProtocol
 }
 
 type gateway struct {
@@ -79,18 +86,20 @@ type gateway struct {
 	listenersMu sync.RWMutex
 }
 
-// SSHTunnelManagerInterface defines the interface for SSH tunnel management operations
-type SSHTunnelManagerInterface interface {
-	GetAssignedAddresses(hostname string, port int) []string
-	StartForwarding(config sshmgr.ForwardingConfig) error
-	StopForwarding(config *sshmgr.ForwardingConfig) error
+// SSHSessionPoolInterface is the controller-side view of the pool. Matches
+// *sshmgr.SSHSessionPool's exported signature.
+type SSHSessionPoolInterface interface {
+	ConfigureSessions(ppVersion int, sniEnabled bool) error
+	StartForwarding(kind sshmgr.SessionKind, cfg sshmgr.ForwardingConfig) error
+	StopForwarding(kind sshmgr.SessionKind, cfg *sshmgr.ForwardingConfig) error
+	GetAssignedAddresses(kind sshmgr.SessionKind, hostname string, port int) []string
+	IsConnected(kind sshmgr.SessionKind) bool
+	Connect()
 	Stop()
-	Connect() error
-	IsConnected() bool
 }
 
 type GatewayReconciler struct {
-	manager SSHTunnelManagerInterface
+	pool SSHSessionPoolInterface
 
 	client.Client
 	Scheme *runtime.Scheme
@@ -115,7 +124,7 @@ func isRouteAlreadyAttached(l *Listener, routeName, routeNamespace, backendHost 
 // For wildcard (0.0.0.0, localhost) without TCP port pinning: accepts any assigned address.
 // Returns false if no addresses assigned or a mismatch is detected.
 func (r *GatewayReconciler) isForwardingValid(l *Listener) bool {
-	addrs := r.manager.GetAssignedAddresses(l.Hostname, l.Port)
+	addrs := r.pool.GetAssignedAddresses(l.SessionKind, l.Hostname, l.Port)
 	if len(addrs) == 0 {
 		return false // No forwarding exists in SSH manager
 	}
@@ -139,7 +148,7 @@ func (r *GatewayReconciler) setupRouteForwarding(l *Listener, gwKey, routeName, 
 			"gateway", gwKey,
 			"oldRoute", fmt.Sprintf("%s/%s", l.route.Namespace, l.route.Name),
 			"newRoute", fmt.Sprintf("%s/%s", routeNamespace, routeName))
-		err := r.manager.StopForwarding(&sshmgr.ForwardingConfig{
+		err := r.pool.StopForwarding(l.SessionKind, &sshmgr.ForwardingConfig{
 			RemoteHost:   l.Hostname,
 			RemotePort:   l.Port,
 			InternalHost: l.route.Host,
@@ -159,7 +168,7 @@ func (r *GatewayReconciler) setupRouteForwarding(l *Listener, gwKey, routeName, 
 	}
 
 	// Check SSH connection status
-	if !r.manager.IsConnected() {
+	if !r.pool.IsConnected(l.SessionKind) {
 		slog.With("function", "setupRouteForwarding").Warn("SSH manager is not connected, cannot start forwarding",
 			"gateway", gwKey,
 			"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
@@ -170,7 +179,7 @@ func (r *GatewayReconciler) setupRouteForwarding(l *Listener, gwKey, routeName, 
 	// Start forwarding. For TCP listeners pinning a specific port, require the
 	// server to honor that port — otherwise we'd silently accept whatever port
 	// the SSH server assigns and route traffic to the wrong listener.
-	err := r.manager.StartForwarding(sshmgr.ForwardingConfig{
+	err := r.pool.StartForwarding(l.SessionKind, sshmgr.ForwardingConfig{
 		RemoteHost:   l.Hostname,
 		RemotePort:   l.Port,
 		InternalHost: route.Host,
@@ -250,6 +259,10 @@ func (r *GatewayReconciler) SetRoute(ctx context.Context, gwNamespace, gwName, l
 			"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
 			"hasExistingRoute", l.route != nil)
 
+		if l.Rejected {
+			return fmt.Errorf("listener %s is not programmed: %s", listenerName, l.Reason)
+		}
+
 		// Check if route is already correctly attached (idempotency for periodic reconciliation)
 		if isRouteAlreadyAttached(l, routeName, routeNamespace, backendHost, backendPort) {
 			// Validate forwarding still exists and is valid
@@ -318,7 +331,7 @@ func (r *GatewayReconciler) RemoveRoute(ctx context.Context, gwNamespace, gwName
 	defer gw.listenersMu.Unlock()
 
 	if l, exist := gw.listeners[listenerName]; exist && l.route != nil && l.route.Name == routeName && l.route.Namespace == routeNamespace {
-		err := r.manager.StopForwarding(&sshmgr.ForwardingConfig{
+		err := r.pool.StopForwarding(l.SessionKind, &sshmgr.ForwardingConfig{
 			RemoteHost:   l.Hostname,
 			RemotePort:   l.Port,
 			InternalHost: l.route.Host,
@@ -356,17 +369,11 @@ func (r *GatewayReconciler) RemoveRoute(ctx context.Context, gwNamespace, gwName
 func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.gateways = make(map[string]*gateway)
 	ctx := context.Background()
-	manager, err := createSSHManager(ctx)
+	pool, err := createSSHSessionPool(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to create SSH manager for gateway controller: %w", err)
+		return fmt.Errorf("failed to create SSH session pool: %w", err)
 	}
-	r.manager = manager
-
-	// Try initial connection
-	if err := r.manager.Connect(); err != nil {
-		// Log error but continue - will retry in Reconcile loop
-		slog.With("function", "SetupWithManager").Error("failed to establish initial SSH connection", "error", err)
-	}
+	r.pool = pool
 
 	if err := RegisterGatewayClassController(mgr); err != nil {
 		return fmt.Errorf("failed to register GatewayClass controller: %w", err)
@@ -382,11 +389,11 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	key := fmt.Sprintf("%s/%s", req.Namespace, req.Name)
 	slog.With("function", "Reconcile").Debug("reconciling Gateway", "gateway", key, "request", req)
 
-	// Check and maintain SSH connection
-	if !r.manager.IsConnected() {
-		slog.With("function", "Reconcile").Info("SSH manager disconnected, attempting to reconnect")
-		if err := r.manager.Connect(); err != nil {
-			slog.With("function", "Reconcile").Error("failed to connect SSH manager", "error", err)
+	// Check and maintain SSH connection (plain session is always required)
+	if !r.pool.IsConnected(sshmgr.SessionPlain) {
+		slog.With("function", "Reconcile").Info("SSH plain session disconnected, attempting reconnect")
+		r.pool.Connect()
+		if !r.pool.IsConnected(sshmgr.SessionPlain) {
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 		slog.With("function", "Reconcile").Info("SSH connection established/restored")
@@ -431,7 +438,13 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	// TODO(task-6): Session configuration is applied via the pool — see Task 6.
+	// Configure sessions based on GatewayClass annotations
+	sessions := parseClassSessionConfig(gc.Annotations)
+	if err := r.pool.ConfigureSessions(sessions.ProxyProtocolVersion, sessions.SNIProxyEnabled); err != nil {
+		slog.With("function", "Reconcile").Error("failed to configure SSH sessions",
+			"gatewayClass", gc.Name, "error", err)
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
 
 	// Handle add or update
 	slog.With("function", "Reconcile", "gateway", req.NamespacedName).Debug("adding or updating gateway")
@@ -503,8 +516,12 @@ func (r *GatewayReconciler) updateGatewayAddresses(k8sGw *gatewayv1.Gateway) {
 	addressesSeen := make(map[string]bool)
 
 	for _, listener := range gw.listeners {
-		// Get assigned addresses for this listener from the SSH tunnel manager
-		addrs := r.manager.GetAssignedAddresses(listener.Hostname, listener.Port)
+		// Skip rejected listeners (their session kind may not even be enabled)
+		if listener.Rejected {
+			continue
+		}
+		// Get assigned addresses for this listener from the SSH session pool
+		addrs := r.pool.GetAssignedAddresses(listener.SessionKind, listener.Hostname, listener.Port)
 
 		for _, addr := range addrs {
 			// Extract just the hostname from the URI
@@ -620,7 +637,7 @@ func (r *GatewayReconciler) handleAddOrUpdateGateway(_ context.Context, k8sGw *g
 			listeners: make(map[string]*Listener),
 		}
 		for _, k8sListener := range k8sGw.Spec.Listeners {
-			listener := createListener(k8sListener)
+			listener := createListener(k8sListener, k8sGw.Annotations)
 			gw.listeners[string(k8sListener.Name)] = listener
 		}
 		r.gateways[gwKey] = gw
@@ -634,15 +651,15 @@ func (r *GatewayReconciler) handleAddOrUpdateGateway(_ context.Context, k8sGw *g
 
 		for _, k8sListener := range k8sGw.Spec.Listeners {
 			listenerName := string(k8sListener.Name)
-			listener := createListener(k8sListener)
+			listener := createListener(k8sListener, k8sGw.Annotations)
 
 			if existing, exists := existingListeners[listenerName]; exists {
-				if existing.Port != listener.Port || existing.Hostname != listener.Hostname {
+				if existing.Port != listener.Port || existing.Hostname != listener.Hostname || existing.SessionKind != listener.SessionKind {
 					// Listener configuration changed, handle accordingly
 					slog.With("function", "handleAddOrUpdateGateway").Debug("listener configuration changed, updating", "listener", listenerName)
-					// Stop existing forwarding if no longer needed
+					// Stop existing forwarding on the OLD kind, if needed
 					if existing.route != nil {
-						if err := r.manager.StopForwarding(&sshmgr.ForwardingConfig{
+						if err := r.pool.StopForwarding(existing.SessionKind, &sshmgr.ForwardingConfig{
 							RemoteHost:   existing.Hostname,
 							RemotePort:   existing.Port,
 							InternalHost: existing.route.Host,
@@ -684,7 +701,7 @@ func (r *GatewayReconciler) handleDeleteGateway(_ context.Context, k8sGw *gatewa
 		// Delete listeners and stop forwardings
 		for _, listener := range gw.listeners {
 			if listener.route != nil {
-				err := r.manager.StopForwarding(&sshmgr.ForwardingConfig{
+				err := r.pool.StopForwarding(listener.SessionKind, &sshmgr.ForwardingConfig{
 					RemoteHost:   listener.Hostname,
 					RemotePort:   listener.Port,
 					InternalHost: listener.route.Host,
@@ -699,7 +716,7 @@ func (r *GatewayReconciler) handleDeleteGateway(_ context.Context, k8sGw *gatewa
 			delete(gw.listeners, listener.Hostname)
 		}
 		delete(r.gateways, gwKey)
-		slog.With("function", "handleDeleteGateway").Debug("SSHTunnelManager stopped for Gateway", "gateway", gwKey)
+		slog.With("function", "handleDeleteGateway").Debug("SSHSessionPool: stopped forwarding for Gateway", "gateway", gwKey)
 	}
 }
 

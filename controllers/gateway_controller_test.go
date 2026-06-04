@@ -23,21 +23,20 @@ import (
 
 // TestUpdateGatewayAddresses_HTTPAddresses tests address extraction for HTTP/HTTPS URIs
 func TestUpdateGatewayAddresses_HTTPAddresses(t *testing.T) {
-	// Create a mock SSH manager that returns HTTP URIs
-	mockManager := &mockSSHTunnelManager{
-		assignedAddrs: map[string][]string{
-			"example.com:80": {"http://example.com", "https://example.com"},
-		},
+	mockPool := newMockPool()
+	mockPool.assignedAddrs[sshmgr.SessionPlain] = map[string][]string{
+		"example.com:80": {"http://example.com", "https://example.com"},
 	}
 
 	reconciler := &GatewayReconciler{
-		manager: mockManager,
+		pool: mockPool,
 		gateways: map[string]*gateway{
 			"test-ns/test-gw": {
 				listeners: map[string]*Listener{
 					"http-listener": {
-						Hostname: "example.com",
-						Port:     80,
+						Hostname:    "example.com",
+						Port:        80,
+						SessionKind: sshmgr.SessionPlain,
 					},
 				},
 			},
@@ -58,21 +57,20 @@ func TestUpdateGatewayAddresses_HTTPAddresses(t *testing.T) {
 
 // TestUpdateGatewayAddresses_TCPAddresses tests address extraction for TCP URIs
 func TestUpdateGatewayAddresses_TCPAddresses(t *testing.T) {
-	// Create a mock SSH manager that returns TCP URIs
-	mockManager := &mockSSHTunnelManager{
-		assignedAddrs: map[string][]string{
-			"0.0.0.0:8080": {"tcp://nue.tuns.sh:34012"},
-		},
+	mockPool := newMockPool()
+	mockPool.assignedAddrs[sshmgr.SessionPlain] = map[string][]string{
+		"0.0.0.0:8080": {"tcp://nue.tuns.sh:34012"},
 	}
 
 	reconciler := &GatewayReconciler{
-		manager: mockManager,
+		pool: mockPool,
 		gateways: map[string]*gateway{
 			"test-ns/test-gw": {
 				listeners: map[string]*Listener{
 					"tcp-listener": {
-						Hostname: "0.0.0.0",
-						Port:     8080,
+						Hostname:    "0.0.0.0",
+						Port:        8080,
+						SessionKind: sshmgr.SessionPlain,
 					},
 				},
 			},
@@ -93,31 +91,32 @@ func TestUpdateGatewayAddresses_TCPAddresses(t *testing.T) {
 
 // TestUpdateGatewayAddresses_MixedAddresses tests multiple listeners with different address types
 func TestUpdateGatewayAddresses_MixedAddresses(t *testing.T) {
-	// Create a mock SSH manager that returns both HTTP and TCP URIs
-	mockManager := &mockSSHTunnelManager{
-		assignedAddrs: map[string][]string{
-			"example.com:80":      {"http://example.com", "https://example.com"},
-			"0.0.0.0:8080":        {"tcp://nue.tuns.sh:34012"},
-			"api.example.com:443": {"https://api.example.com"},
-		},
+	mockPool := newMockPool()
+	mockPool.assignedAddrs[sshmgr.SessionPlain] = map[string][]string{
+		"example.com:80":      {"http://example.com", "https://example.com"},
+		"0.0.0.0:8080":        {"tcp://nue.tuns.sh:34012"},
+		"api.example.com:443": {"https://api.example.com"},
 	}
 
 	reconciler := &GatewayReconciler{
-		manager: mockManager,
+		pool: mockPool,
 		gateways: map[string]*gateway{
 			"test-ns/test-gw": {
 				listeners: map[string]*Listener{
 					"http-listener": {
-						Hostname: "example.com",
-						Port:     80,
+						Hostname:    "example.com",
+						Port:        80,
+						SessionKind: sshmgr.SessionPlain,
 					},
 					"tcp-listener": {
-						Hostname: "0.0.0.0",
-						Port:     8080,
+						Hostname:    "0.0.0.0",
+						Port:        8080,
+						SessionKind: sshmgr.SessionPlain,
 					},
 					"https-listener": {
-						Hostname: "api.example.com",
-						Port:     443,
+						Hostname:    "api.example.com",
+						Port:        443,
+						SessionKind: sshmgr.SessionPlain,
 					},
 				},
 			},
@@ -147,31 +146,31 @@ func TestUpdateGatewayAddresses_MixedAddresses(t *testing.T) {
 
 // TestUpdateGatewayAddresses_NoDuplicates tests that duplicate addresses are filtered
 func TestUpdateGatewayAddresses_NoDuplicates(t *testing.T) {
-	// Create a mock SSH manager that returns duplicate URIs
-	mockManager := &mockSSHTunnelManager{
-		assignedAddrs: map[string][]string{
-			"example.com:80": {
-				"http://example.com",
-				"https://example.com",
-			},
-			"example.com:443": {
-				"https://example.com", // Duplicate - should be filtered
-			},
+	mockPool := newMockPool()
+	mockPool.assignedAddrs[sshmgr.SessionPlain] = map[string][]string{
+		"example.com:80": {
+			"http://example.com",
+			"https://example.com",
+		},
+		"example.com:443": {
+			"https://example.com", // Duplicate - should be filtered
 		},
 	}
 
 	reconciler := &GatewayReconciler{
-		manager: mockManager,
+		pool: mockPool,
 		gateways: map[string]*gateway{
 			"test-ns/test-gw": {
 				listeners: map[string]*Listener{
 					"http-listener": {
-						Hostname: "example.com",
-						Port:     80,
+						Hostname:    "example.com",
+						Port:        80,
+						SessionKind: sshmgr.SessionPlain,
 					},
 					"https-listener": {
-						Hostname: "example.com",
-						Port:     443,
+						Hostname:    "example.com",
+						Port:        443,
+						SessionKind: sshmgr.SessionPlain,
 					},
 				},
 			},
@@ -191,18 +190,17 @@ func TestUpdateGatewayAddresses_NoDuplicates(t *testing.T) {
 
 // TestUpdateGatewayAddresses_NoAddresses tests behavior when no addresses are assigned
 func TestUpdateGatewayAddresses_NoAddresses(t *testing.T) {
-	mockManager := &mockSSHTunnelManager{
-		assignedAddrs: map[string][]string{},
-	}
+	mockPool := newMockPool()
 
 	reconciler := &GatewayReconciler{
-		manager: mockManager,
+		pool: mockPool,
 		gateways: map[string]*gateway{
 			"test-ns/test-gw": {
 				listeners: map[string]*Listener{
 					"http-listener": {
-						Hostname: "example.com",
-						Port:     80,
+						Hostname:    "example.com",
+						Port:        80,
+						SessionKind: sshmgr.SessionPlain,
 					},
 				},
 			},
@@ -221,12 +219,10 @@ func TestUpdateGatewayAddresses_NoAddresses(t *testing.T) {
 
 // TestUpdateGatewayAddresses_GatewayNotFound tests behavior when gateway doesn't exist
 func TestUpdateGatewayAddresses_GatewayNotFound(t *testing.T) {
-	mockManager := &mockSSHTunnelManager{
-		assignedAddrs: map[string][]string{},
-	}
+	mockPool := newMockPool()
 
 	reconciler := &GatewayReconciler{
-		manager:  mockManager,
+		pool:     mockPool,
 		gateways: map[string]*gateway{},
 	}
 
@@ -240,45 +236,81 @@ func TestUpdateGatewayAddresses_GatewayNotFound(t *testing.T) {
 	assert.Len(t, k8sGw.Status.Addresses, 0)
 }
 
-// Mock SSH Tunnel Manager for testing
-type mockSSHTunnelManager struct {
-	assignedAddrs        map[string][]string
-	connected            bool
+// startCall and stopCall record per-kind forwarding operations.
+type startCall struct {
+	Kind sshmgr.SessionKind
+	Cfg  sshmgr.ForwardingConfig
+}
+type stopCall struct {
+	Kind sshmgr.SessionKind
+	Cfg  sshmgr.ForwardingConfig
+}
+
+// mockSSHSessionPool is the test double for SSHSessionPoolInterface.
+type mockSSHSessionPool struct {
+	assignedAddrs        map[sshmgr.SessionKind]map[string][]string
+	connectedKinds       map[sshmgr.SessionKind]bool
+	configureCalls       []struct{ PP int; SNI bool }
+	startForwardingCalls []startCall
+	stopForwardingCalls  []stopCall
 	startForwardingErr   error
 	stopForwardingErr    error
-	connectErr           error
-	stopForwardingCalls  []sshmgr.ForwardingConfig
-	startForwardingCalls []sshmgr.ForwardingConfig
+	configureErr         error
+	connectShouldFail    bool // when true Connect() does not establish the plain session
 }
 
-func (m *mockSSHTunnelManager) GetAssignedAddresses(hostname string, port int) []string {
-	key := forwardingKey(hostname, port)
-	return m.assignedAddrs[key]
-}
-
-func (m *mockSSHTunnelManager) StartForwarding(config sshmgr.ForwardingConfig) error {
-	m.startForwardingCalls = append(m.startForwardingCalls, config)
-	return m.startForwardingErr
-}
-
-func (m *mockSSHTunnelManager) StopForwarding(config *sshmgr.ForwardingConfig) error {
-	m.stopForwardingCalls = append(m.stopForwardingCalls, *config)
-	return m.stopForwardingErr
-}
-
-func (m *mockSSHTunnelManager) Stop() {}
-
-func (m *mockSSHTunnelManager) Connect() error {
-	if m.connectErr != nil {
-		return m.connectErr
+func newMockPool() *mockSSHSessionPool {
+	return &mockSSHSessionPool{
+		assignedAddrs:  map[sshmgr.SessionKind]map[string][]string{},
+		connectedKinds: map[sshmgr.SessionKind]bool{sshmgr.SessionPlain: true},
 	}
-	m.connected = true
+}
+
+func (m *mockSSHSessionPool) ConfigureSessions(pp int, sni bool) error {
+	m.configureCalls = append(m.configureCalls, struct{ PP int; SNI bool }{pp, sni})
+	if m.configureErr != nil {
+		return m.configureErr
+	}
+	if pp > 0 {
+		m.connectedKinds[sshmgr.SessionProxyProto] = true
+	} else {
+		delete(m.connectedKinds, sshmgr.SessionProxyProto)
+	}
+	if sni {
+		m.connectedKinds[sshmgr.SessionSNIProxy] = true
+	} else {
+		delete(m.connectedKinds, sshmgr.SessionSNIProxy)
+	}
 	return nil
 }
 
-func (m *mockSSHTunnelManager) IsConnected() bool {
-	return m.connected
+func (m *mockSSHSessionPool) StartForwarding(kind sshmgr.SessionKind, cfg sshmgr.ForwardingConfig) error {
+	m.startForwardingCalls = append(m.startForwardingCalls, startCall{kind, cfg})
+	return m.startForwardingErr
 }
+
+func (m *mockSSHSessionPool) StopForwarding(kind sshmgr.SessionKind, cfg *sshmgr.ForwardingConfig) error {
+	m.stopForwardingCalls = append(m.stopForwardingCalls, stopCall{kind, *cfg})
+	return m.stopForwardingErr
+}
+
+func (m *mockSSHSessionPool) GetAssignedAddresses(kind sshmgr.SessionKind, hostname string, port int) []string {
+	if byHost, ok := m.assignedAddrs[kind]; ok {
+		return byHost[forwardingKey(hostname, port)]
+	}
+	return nil
+}
+
+func (m *mockSSHSessionPool) IsConnected(kind sshmgr.SessionKind) bool {
+	return m.connectedKinds[kind]
+}
+
+func (m *mockSSHSessionPool) Connect() {
+	if !m.connectShouldFail {
+		m.connectedKinds[sshmgr.SessionPlain] = true
+	}
+}
+func (m *mockSSHSessionPool) Stop() {}
 
 func forwardingKey(hostname string, port int) string {
 	return fmt.Sprintf("%s:%d", hostname, port)
@@ -387,8 +419,9 @@ func TestIsForwardingValid(t *testing.T) {
 		{
 			name: "no addresses assigned",
 			listener: &Listener{
-				Hostname: "example.com",
-				Port:     80,
+				Hostname:    "example.com",
+				Port:        80,
+				SessionKind: sshmgr.SessionPlain,
 			},
 			assignedAddrs: map[string][]string{},
 			expected:      false,
@@ -396,8 +429,9 @@ func TestIsForwardingValid(t *testing.T) {
 		{
 			name: "hostname matches in HTTP URI",
 			listener: &Listener{
-				Hostname: "example.com",
-				Port:     80,
+				Hostname:    "example.com",
+				Port:        80,
+				SessionKind: sshmgr.SessionPlain,
 			},
 			assignedAddrs: map[string][]string{
 				"example.com:80": {"http://example.com", "https://example.com"},
@@ -407,8 +441,9 @@ func TestIsForwardingValid(t *testing.T) {
 		{
 			name: "hostname matches in HTTPS URI",
 			listener: &Listener{
-				Hostname: "api.example.com",
-				Port:     443,
+				Hostname:    "api.example.com",
+				Port:        443,
+				SessionKind: sshmgr.SessionPlain,
 			},
 			assignedAddrs: map[string][]string{
 				"api.example.com:443": {"https://api.example.com"},
@@ -418,8 +453,9 @@ func TestIsForwardingValid(t *testing.T) {
 		{
 			name: "hostname mismatch - wrong subdomain assigned",
 			listener: &Listener{
-				Hostname: "requested.example.com",
-				Port:     80,
+				Hostname:    "requested.example.com",
+				Port:        80,
+				SessionKind: sshmgr.SessionPlain,
 			},
 			assignedAddrs: map[string][]string{
 				"requested.example.com:80": {"http://random-abc123.example.com", "https://random-abc123.example.com"},
@@ -429,8 +465,9 @@ func TestIsForwardingValid(t *testing.T) {
 		{
 			name: "wildcard accepts any address",
 			listener: &Listener{
-				Hostname: "0.0.0.0",
-				Port:     8080,
+				Hostname:    "0.0.0.0",
+				Port:        8080,
+				SessionKind: sshmgr.SessionPlain,
 			},
 			assignedAddrs: map[string][]string{
 				"0.0.0.0:8080": {"http://random-subdomain.example.com"},
@@ -440,8 +477,9 @@ func TestIsForwardingValid(t *testing.T) {
 		{
 			name: "wildcard with TCP URI",
 			listener: &Listener{
-				Hostname: "0.0.0.0",
-				Port:     3306,
+				Hostname:    "0.0.0.0",
+				Port:        3306,
+				SessionKind: sshmgr.SessionPlain,
 			},
 			assignedAddrs: map[string][]string{
 				"0.0.0.0:3306": {"tcp://nue.tuns.sh:34567"},
@@ -451,8 +489,9 @@ func TestIsForwardingValid(t *testing.T) {
 		{
 			name: "wildcard but no addresses",
 			listener: &Listener{
-				Hostname: "0.0.0.0",
-				Port:     8080,
+				Hostname:    "0.0.0.0",
+				Port:        8080,
+				SessionKind: sshmgr.SessionPlain,
 			},
 			assignedAddrs: map[string][]string{},
 			expected:      false,
@@ -460,8 +499,9 @@ func TestIsForwardingValid(t *testing.T) {
 		{
 			name: "partial hostname match",
 			listener: &Listener{
-				Hostname: "api.example.com",
-				Port:     80,
+				Hostname:    "api.example.com",
+				Port:        80,
+				SessionKind: sshmgr.SessionPlain,
 			},
 			assignedAddrs: map[string][]string{
 				"api.example.com:80": {"http://my-api.example.com"},
@@ -471,9 +511,10 @@ func TestIsForwardingValid(t *testing.T) {
 		{
 			name: "TCP listener with localhost and matching port",
 			listener: &Listener{
-				Hostname: "localhost",
-				Protocol: "TCP",
-				Port:     27101,
+				Hostname:    "localhost",
+				Protocol:    "TCP",
+				Port:        27101,
+				SessionKind: sshmgr.SessionPlain,
 			},
 			assignedAddrs: map[string][]string{
 				"localhost:27101": {"tcp://nue.tuns.sh:27101"},
@@ -483,9 +524,10 @@ func TestIsForwardingValid(t *testing.T) {
 		{
 			name: "TCP listener with localhost and mismatched port",
 			listener: &Listener{
-				Hostname: "localhost",
-				Protocol: "TCP",
-				Port:     27101,
+				Hostname:    "localhost",
+				Protocol:    "TCP",
+				Port:        27101,
+				SessionKind: sshmgr.SessionPlain,
 			},
 			assignedAddrs: map[string][]string{
 				"localhost:27101": {"tcp://nue.tuns.sh:31879"},
@@ -495,9 +537,10 @@ func TestIsForwardingValid(t *testing.T) {
 		{
 			name: "TCP listener with 0.0.0.0 and mismatched port",
 			listener: &Listener{
-				Hostname: "0.0.0.0",
-				Protocol: "TCP",
-				Port:     27101,
+				Hostname:    "0.0.0.0",
+				Protocol:    "TCP",
+				Port:        27101,
+				SessionKind: sshmgr.SessionPlain,
 			},
 			assignedAddrs: map[string][]string{
 				"0.0.0.0:27101": {"tcp://nue.tuns.sh:31879"},
@@ -508,12 +551,13 @@ func TestIsForwardingValid(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mockManager := &mockSSHTunnelManager{
-				assignedAddrs: tt.assignedAddrs,
+			mockPool := newMockPool()
+			if len(tt.assignedAddrs) > 0 {
+				mockPool.assignedAddrs[tt.listener.SessionKind] = tt.assignedAddrs
 			}
 
 			reconciler := &GatewayReconciler{
-				manager: mockManager,
+				pool: mockPool,
 			}
 
 			result := reconciler.isForwardingValid(tt.listener)
@@ -525,22 +569,18 @@ func TestIsForwardingValid(t *testing.T) {
 // TestSetRoute_ValidatesForwarding tests that SetRoute validates forwarding exists
 func TestSetRoute_ValidatesForwarding(t *testing.T) {
 	t.Run("detects invalid forwarding and clears stale state", func(t *testing.T) {
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{
-				// No addresses for this listener
-			},
-			connected: true,
-		}
+		mockPool := newMockPool()
 
 		reconciler := &GatewayReconciler{
-			manager: mockManager,
+			pool: mockPool,
 			gateways: map[string]*gateway{
 				"test-ns/test-gw": {
 					listeners: map[string]*Listener{
 						"http": {
-							Hostname: "example.com",
-							Port:     80,
-							Protocol: "HTTP",
+							Hostname:    "example.com",
+							Port:        80,
+							Protocol:    "HTTP",
+							SessionKind: sshmgr.SessionPlain,
 							route: &Route{
 								Name:      "test-route",
 								Namespace: "test-ns",
@@ -567,22 +607,21 @@ func TestSetRoute_ValidatesForwarding(t *testing.T) {
 	})
 
 	t.Run("detects hostname mismatch and retries", func(t *testing.T) {
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{
-				"requested.example.com:80": {"http://random-abc123.example.com"}, // Wrong hostname!
-			},
-			connected: true,
+		mockPool := newMockPool()
+		mockPool.assignedAddrs[sshmgr.SessionPlain] = map[string][]string{
+			"requested.example.com:80": {"http://random-abc123.example.com"}, // Wrong hostname!
 		}
 
 		reconciler := &GatewayReconciler{
-			manager: mockManager,
+			pool: mockPool,
 			gateways: map[string]*gateway{
 				"test-ns/test-gw": {
 					listeners: map[string]*Listener{
 						"http": {
-							Hostname: "requested.example.com",
-							Port:     80,
-							Protocol: "HTTP",
+							Hostname:    "requested.example.com",
+							Port:        80,
+							Protocol:    "HTTP",
+							SessionKind: sshmgr.SessionPlain,
 							route: &Route{
 								Name:      "test-route",
 								Namespace: "test-ns",
@@ -603,22 +642,21 @@ func TestSetRoute_ValidatesForwarding(t *testing.T) {
 	})
 
 	t.Run("accepts valid forwarding without retry", func(t *testing.T) {
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{
-				"example.com:80": {"http://example.com"}, // Correct hostname
-			},
-			connected: true,
+		mockPool := newMockPool()
+		mockPool.assignedAddrs[sshmgr.SessionPlain] = map[string][]string{
+			"example.com:80": {"http://example.com"}, // Correct hostname
 		}
 
 		reconciler := &GatewayReconciler{
-			manager: mockManager,
+			pool: mockPool,
 			gateways: map[string]*gateway{
 				"test-ns/test-gw": {
 					listeners: map[string]*Listener{
 						"http": {
-							Hostname: "example.com",
-							Port:     80,
-							Protocol: "HTTP",
+							Hostname:    "example.com",
+							Port:        80,
+							Protocol:    "HTTP",
+							SessionKind: sshmgr.SessionPlain,
 							route: &Route{
 								Name:      "test-route",
 								Namespace: "test-ns",
@@ -645,22 +683,21 @@ func TestSetRoute_ValidatesForwarding(t *testing.T) {
 	})
 
 	t.Run("wildcard accepts any hostname", func(t *testing.T) {
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{
-				"0.0.0.0:8080": {"http://random-subdomain.example.com"}, // Any hostname OK
-			},
-			connected: true,
+		mockPool := newMockPool()
+		mockPool.assignedAddrs[sshmgr.SessionPlain] = map[string][]string{
+			"0.0.0.0:8080": {"http://random-subdomain.example.com"}, // Any hostname OK
 		}
 
 		reconciler := &GatewayReconciler{
-			manager: mockManager,
+			pool: mockPool,
 			gateways: map[string]*gateway{
 				"test-ns/test-gw": {
 					listeners: map[string]*Listener{
 						"http": {
-							Hostname: "0.0.0.0",
-							Port:     8080,
-							Protocol: "HTTP",
+							Hostname:    "0.0.0.0",
+							Port:        8080,
+							Protocol:    "HTTP",
+							SessionKind: sshmgr.SessionPlain,
 							route: &Route{
 								Name:      "test-route",
 								Namespace: "test-ns",
@@ -747,12 +784,9 @@ func TestHandleForwardingError(t *testing.T) {
 
 func TestHandleAddOrUpdateGateway(t *testing.T) {
 	t.Run("new gateway creates gateway entry with correct listeners", func(t *testing.T) {
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		}
+		mockPool := newMockPool()
 		reconciler := &GatewayReconciler{
-			manager:  mockManager,
+			pool:     mockPool,
 			gateways: map[string]*gateway{},
 		}
 
@@ -792,21 +826,19 @@ func TestHandleAddOrUpdateGateway(t *testing.T) {
 	})
 
 	t.Run("existing gateway unchanged listeners preserves existing routes", func(t *testing.T) {
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		}
+		mockPool := newMockPool()
 		existingRoute := &Route{Name: "my-route", Namespace: "test-ns", Host: "backend", Port: 8080}
 		reconciler := &GatewayReconciler{
-			manager: mockManager,
+			pool: mockPool,
 			gateways: map[string]*gateway{
 				"test-ns/test-gw": {
 					listeners: map[string]*Listener{
 						"http": {
-							Hostname: "example.com",
-							Port:     80,
-							Protocol: "HTTP",
-							route:    existingRoute,
+							Hostname:    "example.com",
+							Port:        80,
+							Protocol:    "HTTP",
+							SessionKind: sshmgr.SessionPlain,
+							route:       existingRoute,
 						},
 					},
 				},
@@ -840,21 +872,19 @@ func TestHandleAddOrUpdateGateway(t *testing.T) {
 	})
 
 	t.Run("existing gateway changed listener port stops forwarding and creates new listener", func(t *testing.T) {
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		}
+		mockPool := newMockPool()
 		existingRoute := &Route{Name: "my-route", Namespace: "test-ns", Host: "backend", Port: 8080}
 		reconciler := &GatewayReconciler{
-			manager: mockManager,
+			pool: mockPool,
 			gateways: map[string]*gateway{
 				"test-ns/test-gw": {
 					listeners: map[string]*Listener{
 						"http": {
-							Hostname: "example.com",
-							Port:     80,
-							Protocol: "HTTP",
-							route:    existingRoute,
+							Hostname:    "example.com",
+							Port:        80,
+							Protocol:    "HTTP",
+							SessionKind: sshmgr.SessionPlain,
+							route:       existingRoute,
 						},
 					},
 				},
@@ -883,9 +913,9 @@ func TestHandleAddOrUpdateGateway(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Should have called StopForwarding for the old config
-		assert.Len(t, mockManager.stopForwardingCalls, 1)
-		assert.Equal(t, "example.com", mockManager.stopForwardingCalls[0].RemoteHost)
-		assert.Equal(t, 80, mockManager.stopForwardingCalls[0].RemotePort)
+		assert.Len(t, mockPool.stopForwardingCalls, 1)
+		assert.Equal(t, "example.com", mockPool.stopForwardingCalls[0].Cfg.RemoteHost)
+		assert.Equal(t, 80, mockPool.stopForwardingCalls[0].Cfg.RemotePort)
 
 		// New listener should have updated port and no route
 		gw := reconciler.gateways["test-ns/test-gw"]
@@ -894,19 +924,17 @@ func TestHandleAddOrUpdateGateway(t *testing.T) {
 	})
 
 	t.Run("existing gateway new listener added", func(t *testing.T) {
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		}
+		mockPool := newMockPool()
 		reconciler := &GatewayReconciler{
-			manager: mockManager,
+			pool: mockPool,
 			gateways: map[string]*gateway{
 				"test-ns/test-gw": {
 					listeners: map[string]*Listener{
 						"http": {
-							Hostname: "example.com",
-							Port:     80,
-							Protocol: "HTTP",
+							Hostname:    "example.com",
+							Port:        80,
+							Protocol:    "HTTP",
+							SessionKind: sshmgr.SessionPlain,
 						},
 					},
 				},
@@ -948,24 +976,23 @@ func TestHandleAddOrUpdateGateway(t *testing.T) {
 	})
 
 	t.Run("existing gateway listener removed only keeps listeners from spec", func(t *testing.T) {
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		}
+		mockPool := newMockPool()
 		reconciler := &GatewayReconciler{
-			manager: mockManager,
+			pool: mockPool,
 			gateways: map[string]*gateway{
 				"test-ns/test-gw": {
 					listeners: map[string]*Listener{
 						"http": {
-							Hostname: "example.com",
-							Port:     80,
-							Protocol: "HTTP",
+							Hostname:    "example.com",
+							Port:        80,
+							Protocol:    "HTTP",
+							SessionKind: sshmgr.SessionPlain,
 						},
 						"tcp": {
-							Hostname: "localhost",
-							Port:     3306,
-							Protocol: "TCP",
+							Hostname:    "localhost",
+							Port:        3306,
+							Protocol:    "TCP",
+							SessionKind: sshmgr.SessionPlain,
 						},
 					},
 				},
@@ -1006,19 +1033,17 @@ func TestHandleAddOrUpdateGateway(t *testing.T) {
 
 func TestHandleDeleteGateway(t *testing.T) {
 	t.Run("deletes gateway with active routes and calls StopForwarding", func(t *testing.T) {
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		}
+		mockPool := newMockPool()
 		reconciler := &GatewayReconciler{
-			manager: mockManager,
+			pool: mockPool,
 			gateways: map[string]*gateway{
 				"test-ns/test-gw": {
 					listeners: map[string]*Listener{
 						"http": {
-							Hostname: "example.com",
-							Port:     80,
-							Protocol: "HTTP",
+							Hostname:    "example.com",
+							Port:        80,
+							Protocol:    "HTTP",
+							SessionKind: sshmgr.SessionPlain,
 							route: &Route{
 								Name:      "my-route",
 								Namespace: "test-ns",
@@ -1045,27 +1070,25 @@ func TestHandleDeleteGateway(t *testing.T) {
 		assert.False(t, exists)
 
 		// StopForwarding should have been called
-		assert.Len(t, mockManager.stopForwardingCalls, 1)
-		assert.Equal(t, "example.com", mockManager.stopForwardingCalls[0].RemoteHost)
-		assert.Equal(t, 80, mockManager.stopForwardingCalls[0].RemotePort)
-		assert.Equal(t, "backend", mockManager.stopForwardingCalls[0].InternalHost)
-		assert.Equal(t, 8080, mockManager.stopForwardingCalls[0].InternalPort)
+		assert.Len(t, mockPool.stopForwardingCalls, 1)
+		assert.Equal(t, "example.com", mockPool.stopForwardingCalls[0].Cfg.RemoteHost)
+		assert.Equal(t, 80, mockPool.stopForwardingCalls[0].Cfg.RemotePort)
+		assert.Equal(t, "backend", mockPool.stopForwardingCalls[0].Cfg.InternalHost)
+		assert.Equal(t, 8080, mockPool.stopForwardingCalls[0].Cfg.InternalPort)
 	})
 
 	t.Run("deletes gateway with no routes", func(t *testing.T) {
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		}
+		mockPool := newMockPool()
 		reconciler := &GatewayReconciler{
-			manager: mockManager,
+			pool: mockPool,
 			gateways: map[string]*gateway{
 				"test-ns/test-gw": {
 					listeners: map[string]*Listener{
 						"http": {
-							Hostname: "example.com",
-							Port:     80,
-							Protocol: "HTTP",
+							Hostname:    "example.com",
+							Port:        80,
+							Protocol:    "HTTP",
+							SessionKind: sshmgr.SessionPlain,
 							// no route
 						},
 					},
@@ -1086,16 +1109,13 @@ func TestHandleDeleteGateway(t *testing.T) {
 		assert.False(t, exists)
 
 		// StopForwarding should NOT have been called (no route)
-		assert.Len(t, mockManager.stopForwardingCalls, 0)
+		assert.Len(t, mockPool.stopForwardingCalls, 0)
 	})
 
 	t.Run("deletes non-existent gateway without panic", func(t *testing.T) {
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		}
+		mockPool := newMockPool()
 		reconciler := &GatewayReconciler{
-			manager:  mockManager,
+			pool:     mockPool,
 			gateways: map[string]*gateway{},
 		}
 
@@ -1117,19 +1137,17 @@ func TestHandleDeleteGateway(t *testing.T) {
 
 func TestRemoveRoute(t *testing.T) {
 	t.Run("remove existing route successfully", func(t *testing.T) {
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		}
+		mockPool := newMockPool()
 		reconciler := &GatewayReconciler{
-			manager: mockManager,
+			pool: mockPool,
 			gateways: map[string]*gateway{
 				"test-ns/test-gw": {
 					listeners: map[string]*Listener{
 						"http": {
-							Hostname: "example.com",
-							Port:     80,
-							Protocol: "HTTP",
+							Hostname:    "example.com",
+							Port:        80,
+							Protocol:    "HTTP",
+							SessionKind: sshmgr.SessionPlain,
 							route: &Route{
 								Name:      "test-route",
 								Namespace: "test-ns",
@@ -1150,18 +1168,15 @@ func TestRemoveRoute(t *testing.T) {
 		assert.Nil(t, gw.listeners["http"].route)
 
 		// StopForwarding should have been called
-		assert.Len(t, mockManager.stopForwardingCalls, 1)
-		assert.Equal(t, "example.com", mockManager.stopForwardingCalls[0].RemoteHost)
-		assert.Equal(t, 80, mockManager.stopForwardingCalls[0].RemotePort)
+		assert.Len(t, mockPool.stopForwardingCalls, 1)
+		assert.Equal(t, "example.com", mockPool.stopForwardingCalls[0].Cfg.RemoteHost)
+		assert.Equal(t, 80, mockPool.stopForwardingCalls[0].Cfg.RemotePort)
 	})
 
 	t.Run("gateway not found returns ErrGatewayNotFound", func(t *testing.T) {
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		}
+		mockPool := newMockPool()
 		reconciler := &GatewayReconciler{
-			manager:  mockManager,
+			pool:     mockPool,
 			gateways: map[string]*gateway{},
 		}
 
@@ -1172,19 +1187,17 @@ func TestRemoveRoute(t *testing.T) {
 	})
 
 	t.Run("route not found returns ErrRouteNotFound", func(t *testing.T) {
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		}
+		mockPool := newMockPool()
 		reconciler := &GatewayReconciler{
-			manager: mockManager,
+			pool: mockPool,
 			gateways: map[string]*gateway{
 				"test-ns/test-gw": {
 					listeners: map[string]*Listener{
 						"http": {
-							Hostname: "example.com",
-							Port:     80,
-							Protocol: "HTTP",
+							Hostname:    "example.com",
+							Port:        80,
+							Protocol:    "HTTP",
+							SessionKind: sshmgr.SessionPlain,
 							// no route attached
 						},
 					},
@@ -1199,20 +1212,18 @@ func TestRemoveRoute(t *testing.T) {
 	})
 
 	t.Run("StopForwarding fails returns error", func(t *testing.T) {
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs:     map[string][]string{},
-			connected:         true,
-			stopForwardingErr: fmt.Errorf("SSH tunnel broken"),
-		}
+		mockPool := newMockPool()
+		mockPool.stopForwardingErr = fmt.Errorf("SSH tunnel broken")
 		reconciler := &GatewayReconciler{
-			manager: mockManager,
+			pool: mockPool,
 			gateways: map[string]*gateway{
 				"test-ns/test-gw": {
 					listeners: map[string]*Listener{
 						"http": {
-							Hostname: "example.com",
-							Port:     80,
-							Protocol: "HTTP",
+							Hostname:    "example.com",
+							Port:        80,
+							Protocol:    "HTTP",
+							SessionKind: sshmgr.SessionPlain,
 							route: &Route{
 								Name:      "test-route",
 								Namespace: "test-ns",
@@ -1382,15 +1393,14 @@ func TestGatewayReconciler_Reconcile(t *testing.T) {
 			WithStatusSubresource(&gatewayv1.Gateway{}).
 			Build()
 
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     false, // SSH disconnected
-		}
+		mockPool := newMockPool()
+		delete(mockPool.connectedKinds, sshmgr.SessionPlain) // SSH disconnected
+		// Connect() will succeed (connectShouldFail == false) and set plain session connected
 
 		reconciler := &GatewayReconciler{
 			Client:   fakeClient,
 			Scheme:   s,
-			manager:  mockManager,
+			pool:     mockPool,
 			gateways: map[string]*gateway{},
 		}
 
@@ -1400,8 +1410,7 @@ func TestGatewayReconciler_Reconcile(t *testing.T) {
 
 		assert.NoError(t, err)
 		assert.Equal(t, gatewayReconcilePeriod, result.RequeueAfter)
-		// Connect should have been called and succeeded
-		assert.True(t, mockManager.connected)
+		assert.True(t, mockPool.connectedKinds[sshmgr.SessionPlain], "plain session should be connected after reconnect")
 	})
 
 	t.Run("SSH disconnected reconnect fails requeues after 10s", func(t *testing.T) {
@@ -1412,16 +1421,14 @@ func TestGatewayReconciler_Reconcile(t *testing.T) {
 			WithScheme(s).
 			Build()
 
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     false,
-			connectErr:    fmt.Errorf("connection refused"),
-		}
+		mockPool := newMockPool()
+		delete(mockPool.connectedKinds, sshmgr.SessionPlain) // SSH disconnected
+		mockPool.connectShouldFail = true                    // Connect() will not establish connection
 
 		reconciler := &GatewayReconciler{
 			Client:   fakeClient,
 			Scheme:   s,
-			manager:  mockManager,
+			pool:     mockPool,
 			gateways: map[string]*gateway{},
 		}
 
@@ -1441,15 +1448,12 @@ func TestGatewayReconciler_Reconcile(t *testing.T) {
 			WithScheme(s).
 			Build()
 
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		}
+		mockPool := newMockPool()
 
 		reconciler := &GatewayReconciler{
 			Client:   fakeClient,
 			Scheme:   s,
-			manager:  mockManager,
+			pool:     mockPool,
 			gateways: map[string]*gateway{},
 		}
 
@@ -1485,21 +1489,19 @@ func TestGatewayReconciler_Reconcile(t *testing.T) {
 			WithStatusSubresource(&gatewayv1.Gateway{}).
 			Build()
 
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		}
+		mockPool := newMockPool()
 
 		reconciler := &GatewayReconciler{
-			Client:  fakeClient,
-			Scheme:  s,
-			manager: mockManager,
+			Client: fakeClient,
+			Scheme: s,
+			pool:   mockPool,
 			gateways: map[string]*gateway{
 				"test-ns/test-gw": {
 					listeners: map[string]*Listener{
 						"http": {
-							Hostname: "example.com",
-							Port:     80,
+							Hostname:    "example.com",
+							Port:        80,
+							SessionKind: sshmgr.SessionPlain,
 							route: &Route{
 								Name:      "my-route",
 								Namespace: "test-ns",
@@ -1524,7 +1526,7 @@ func TestGatewayReconciler_Reconcile(t *testing.T) {
 		assert.False(t, exists)
 
 		// StopForwarding should have been called for the route
-		assert.Len(t, mockManager.stopForwardingCalls, 1)
+		assert.Len(t, mockPool.stopForwardingCalls, 1)
 
 		// After removing the last finalizer from a deleted object, the fake client
 		// garbage-collects it, so we verify via internal state instead.
@@ -1553,15 +1555,12 @@ func TestGatewayReconciler_Reconcile(t *testing.T) {
 			WithStatusSubresource(&gatewayv1.Gateway{}).
 			Build()
 
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		}
+		mockPool := newMockPool()
 
 		reconciler := &GatewayReconciler{
 			Client:   fakeClient,
 			Scheme:   s,
-			manager:  mockManager,
+			pool:     mockPool,
 			gateways: map[string]*gateway{},
 		}
 
@@ -1572,7 +1571,7 @@ func TestGatewayReconciler_Reconcile(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, ctrl.Result{}, result)
 		// StopForwarding should NOT have been called (our finalizer was not present)
-		assert.Len(t, mockManager.stopForwardingCalls, 0)
+		assert.Len(t, mockPool.stopForwardingCalls, 0)
 	})
 
 	t.Run("non-matching controller name skips", func(t *testing.T) {
@@ -1604,15 +1603,12 @@ func TestGatewayReconciler_Reconcile(t *testing.T) {
 			WithStatusSubresource(&gatewayv1.Gateway{}).
 			Build()
 
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		}
+		mockPool := newMockPool()
 
 		reconciler := &GatewayReconciler{
 			Client:   fakeClient,
 			Scheme:   s,
-			manager:  mockManager,
+			pool:     mockPool,
 			gateways: map[string]*gateway{},
 		}
 
@@ -1665,15 +1661,12 @@ func TestGatewayReconciler_Reconcile(t *testing.T) {
 			WithStatusSubresource(&gatewayv1.Gateway{}).
 			Build()
 
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		}
+		mockPool := newMockPool()
 
 		reconciler := &GatewayReconciler{
 			Client:   fakeClient,
 			Scheme:   s,
-			manager:  mockManager,
+			pool:     mockPool,
 			gateways: map[string]*gateway{},
 		}
 
@@ -1720,23 +1713,22 @@ func TestUpdateGatewayStatus(t *testing.T) {
 			WithStatusSubresource(&gatewayv1.Gateway{}).
 			Build()
 
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{
-				"example.com:80": {"http://example.com"},
-			},
-			connected: true,
+		mockPool := newMockPool()
+		mockPool.assignedAddrs[sshmgr.SessionPlain] = map[string][]string{
+			"example.com:80": {"http://example.com"},
 		}
 
 		reconciler := &GatewayReconciler{
-			Client:  fakeClient,
-			Scheme:  s,
-			manager: mockManager,
+			Client: fakeClient,
+			Scheme: s,
+			pool:   mockPool,
 			gateways: map[string]*gateway{
 				"test-ns/test-gw": {
 					listeners: map[string]*Listener{
 						"http": {
-							Hostname: "example.com",
-							Port:     80,
+							Hostname:    "example.com",
+							Port:        80,
+							SessionKind: sshmgr.SessionPlain,
 						},
 					},
 				},
@@ -1761,15 +1753,12 @@ func TestUpdateGatewayStatus(t *testing.T) {
 			WithScheme(s).
 			Build()
 
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		}
+		mockPool := newMockPool()
 
 		reconciler := &GatewayReconciler{
 			Client:   fakeClient,
 			Scheme:   s,
-			manager:  mockManager,
+			pool:     mockPool,
 			gateways: map[string]*gateway{},
 		}
 
@@ -1801,15 +1790,12 @@ func TestUpdateGatewayStatusIfChanged(t *testing.T) {
 			WithStatusSubresource(&gatewayv1.Gateway{}).
 			Build()
 
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		}
+		mockPool := newMockPool()
 
 		reconciler := &GatewayReconciler{
-			Client:  fakeClient,
-			Scheme:  s,
-			manager: mockManager,
+			Client: fakeClient,
+			Scheme: s,
+			pool:   mockPool,
 			gateways: map[string]*gateway{
 				"test-ns/test-gw": {
 					listeners: map[string]*Listener{},
@@ -1870,23 +1856,22 @@ func TestUpdateGatewayStatusIfChanged(t *testing.T) {
 			WithStatusSubresource(&gatewayv1.Gateway{}).
 			Build()
 
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{
-				"example.com:80": {"http://example.com"},
-			},
-			connected: true,
+		mockPool2 := newMockPool()
+		mockPool2.assignedAddrs[sshmgr.SessionPlain] = map[string][]string{
+			"example.com:80": {"http://example.com"},
 		}
 
-		reconciler := &GatewayReconciler{
-			Client:  fakeClient,
-			Scheme:  s,
-			manager: mockManager,
+		reconciler2 := &GatewayReconciler{
+			Client: fakeClient,
+			Scheme: s,
+			pool:   mockPool2,
 			gateways: map[string]*gateway{
 				"test-ns/test-gw": {
 					listeners: map[string]*Listener{
 						"http": {
-							Hostname: "example.com",
-							Port:     80,
+							Hostname:    "example.com",
+							Port:        80,
+							SessionKind: sshmgr.SessionPlain,
 						},
 					},
 				},
@@ -1898,7 +1883,7 @@ func TestUpdateGatewayStatusIfChanged(t *testing.T) {
 		err := fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "test-ns", Name: "test-gw"}, &fresh)
 		assert.NoError(t, err)
 
-		err = reconciler.updateGatewayStatusIfChanged(context.Background(), &fresh, "test-ns/test-gw")
+		err = reconciler2.updateGatewayStatusIfChanged(context.Background(), &fresh, "test-ns/test-gw")
 		assert.NoError(t, err)
 
 		// Verify addresses were updated
@@ -1953,23 +1938,22 @@ func TestUpdateGatewayStatusIfChanged(t *testing.T) {
 			WithStatusSubresource(&gatewayv1.Gateway{}).
 			Build()
 
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{
-				"example.com:80": {"http://example.com"},
-			},
-			connected: true,
+		mockPool3 := newMockPool()
+		mockPool3.assignedAddrs[sshmgr.SessionPlain] = map[string][]string{
+			"example.com:80": {"http://example.com"},
 		}
 
-		reconciler := &GatewayReconciler{
-			Client:  fakeClient,
-			Scheme:  s,
-			manager: mockManager,
+		reconciler3 := &GatewayReconciler{
+			Client: fakeClient,
+			Scheme: s,
+			pool:   mockPool3,
 			gateways: map[string]*gateway{
 				"test-ns/test-gw": {
 					listeners: map[string]*Listener{
 						"http": {
-							Hostname: "example.com",
-							Port:     80,
+							Hostname:    "example.com",
+							Port:        80,
+							SessionKind: sshmgr.SessionPlain,
 						},
 					},
 				},
@@ -1982,7 +1966,7 @@ func TestUpdateGatewayStatusIfChanged(t *testing.T) {
 		assert.NoError(t, err)
 
 		// This should succeed without error; conditions and addresses unchanged
-		err = reconciler.updateGatewayStatusIfChanged(context.Background(), &fresh, "test-ns/test-gw")
+		err = reconciler3.updateGatewayStatusIfChanged(context.Background(), &fresh, "test-ns/test-gw")
 		assert.NoError(t, err)
 	})
 }
@@ -1991,15 +1975,13 @@ func TestUpdateGatewayStatusIfChanged(t *testing.T) {
 
 func TestSetupRouteForwarding(t *testing.T) {
 	t.Run("existing route stops old forwarding and starts new", func(t *testing.T) {
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		}
+		mockPool := newMockPool()
 
 		listener := &Listener{
-			Hostname: "example.com",
-			Port:     80,
-			Protocol: "HTTP",
+			Hostname:    "example.com",
+			Port:        80,
+			Protocol:    "HTTP",
+			SessionKind: sshmgr.SessionPlain,
 			route: &Route{
 				Name:      "old-route",
 				Namespace: "test-ns",
@@ -2009,7 +1991,7 @@ func TestSetupRouteForwarding(t *testing.T) {
 		}
 
 		reconciler := &GatewayReconciler{
-			manager:  mockManager,
+			pool:     mockPool,
 			gateways: map[string]*gateway{},
 		}
 
@@ -2017,14 +1999,14 @@ func TestSetupRouteForwarding(t *testing.T) {
 		assert.NoError(t, err)
 
 		// StopForwarding should have been called for the old route
-		assert.Len(t, mockManager.stopForwardingCalls, 1)
-		assert.Equal(t, "old-backend", mockManager.stopForwardingCalls[0].InternalHost)
-		assert.Equal(t, 8080, mockManager.stopForwardingCalls[0].InternalPort)
+		assert.Len(t, mockPool.stopForwardingCalls, 1)
+		assert.Equal(t, "old-backend", mockPool.stopForwardingCalls[0].Cfg.InternalHost)
+		assert.Equal(t, 8080, mockPool.stopForwardingCalls[0].Cfg.InternalPort)
 
 		// StartForwarding should have been called for the new route
-		assert.Len(t, mockManager.startForwardingCalls, 1)
-		assert.Equal(t, "new-backend", mockManager.startForwardingCalls[0].InternalHost)
-		assert.Equal(t, 9090, mockManager.startForwardingCalls[0].InternalPort)
+		assert.Len(t, mockPool.startForwardingCalls, 1)
+		assert.Equal(t, "new-backend", mockPool.startForwardingCalls[0].Cfg.InternalHost)
+		assert.Equal(t, 9090, mockPool.startForwardingCalls[0].Cfg.InternalPort)
 
 		// Listener should reference the new route
 		assert.Equal(t, "new-route", listener.route.Name)
@@ -2032,16 +2014,14 @@ func TestSetupRouteForwarding(t *testing.T) {
 	})
 
 	t.Run("existing route StopForwarding fails returns error", func(t *testing.T) {
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs:     map[string][]string{},
-			connected:         true,
-			stopForwardingErr: fmt.Errorf("tunnel broken"),
-		}
+		mockPool := newMockPool()
+		mockPool.stopForwardingErr = fmt.Errorf("tunnel broken")
 
 		listener := &Listener{
-			Hostname: "example.com",
-			Port:     80,
-			Protocol: "HTTP",
+			Hostname:    "example.com",
+			Port:        80,
+			Protocol:    "HTTP",
+			SessionKind: sshmgr.SessionPlain,
 			route: &Route{
 				Name:      "old-route",
 				Namespace: "test-ns",
@@ -2051,7 +2031,7 @@ func TestSetupRouteForwarding(t *testing.T) {
 		}
 
 		reconciler := &GatewayReconciler{
-			manager:  mockManager,
+			pool:     mockPool,
 			gateways: map[string]*gateway{},
 		}
 
@@ -2060,23 +2040,22 @@ func TestSetupRouteForwarding(t *testing.T) {
 		assert.Contains(t, err.Error(), "failed to stop forwarding")
 
 		// StartForwarding should NOT have been called
-		assert.Len(t, mockManager.startForwardingCalls, 0)
+		assert.Len(t, mockPool.startForwardingCalls, 0)
 	})
 
 	t.Run("SSH not connected returns ErrGatewayNotReady", func(t *testing.T) {
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     false, // Not connected
-		}
+		mockPool := newMockPool()
+		delete(mockPool.connectedKinds, sshmgr.SessionPlain) // not connected
 
 		listener := &Listener{
-			Hostname: "example.com",
-			Port:     80,
-			Protocol: "HTTP",
+			Hostname:    "example.com",
+			Port:        80,
+			Protocol:    "HTTP",
+			SessionKind: sshmgr.SessionPlain,
 		}
 
 		reconciler := &GatewayReconciler{
-			manager:  mockManager,
+			pool:     mockPool,
 			gateways: map[string]*gateway{},
 		}
 
@@ -2088,20 +2067,18 @@ func TestSetupRouteForwarding(t *testing.T) {
 	})
 
 	t.Run("StartForwarding generic error returns wrapped error", func(t *testing.T) {
-		mockManager := &mockSSHTunnelManager{
-			assignedAddrs:      map[string][]string{},
-			connected:          true,
-			startForwardingErr: fmt.Errorf("network timeout"),
-		}
+		mockPool := newMockPool()
+		mockPool.startForwardingErr = fmt.Errorf("network timeout")
 
 		listener := &Listener{
-			Hostname: "example.com",
-			Port:     80,
-			Protocol: "HTTP",
+			Hostname:    "example.com",
+			Port:        80,
+			Protocol:    "HTTP",
+			SessionKind: sshmgr.SessionPlain,
 		}
 
 		reconciler := &GatewayReconciler{
-			manager:  mockManager,
+			pool:     mockPool,
 			gateways: map[string]*gateway{},
 		}
 
@@ -2114,20 +2091,18 @@ func TestSetupRouteForwarding(t *testing.T) {
 // --- Tests for SetRoute listener not found ---
 
 func TestSetRoute_ListenerNotFound(t *testing.T) {
-	mockManager := &mockSSHTunnelManager{
-		assignedAddrs: map[string][]string{},
-		connected:     true,
-	}
+	mockPool := newMockPool()
 
 	reconciler := &GatewayReconciler{
-		manager: mockManager,
+		pool: mockPool,
 		gateways: map[string]*gateway{
 			"test-ns/test-gw": {
 				listeners: map[string]*Listener{
 					"http": {
-						Hostname: "example.com",
-						Port:     80,
-						Protocol: "HTTP",
+						Hostname:    "example.com",
+						Port:        80,
+						Protocol:    "HTTP",
+						SessionKind: sshmgr.SessionPlain,
 					},
 				},
 			},
@@ -2140,23 +2115,50 @@ func TestSetRoute_ListenerNotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "listener not found: non-existent-listener")
 }
 
+// --- Tests for SetRoute rejected listener guard ---
+
+func TestSetRoute_RejectedListener(t *testing.T) {
+	mockPool := newMockPool()
+
+	reconciler := &GatewayReconciler{
+		pool: mockPool,
+		gateways: map[string]*gateway{
+			"test-ns/test-gw": {
+				listeners: map[string]*Listener{
+					"tls-terminate": {
+						Hostname:    "example.com",
+						Port:        443,
+						Protocol:    "TLS",
+						SessionKind: SessionPlain, // zero-value (Rejected listener)
+						Rejected:    true,
+						Reason:      ReasonUnsupportedTLSMode,
+					},
+				},
+			},
+		},
+	}
+
+	err := reconciler.SetRoute(context.TODO(), "test-ns", "test-gw", "tls-terminate", "test-route", "test-ns", "backend", 8443)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not programmed")
+	assert.Contains(t, err.Error(), ReasonUnsupportedTLSMode)
+}
+
 // --- Tests for handleDeleteGateway with StopForwarding error ---
 
 func TestHandleDeleteGateway_StopForwardingError(t *testing.T) {
-	mockManager := &mockSSHTunnelManager{
-		assignedAddrs:     map[string][]string{},
-		connected:         true,
-		stopForwardingErr: fmt.Errorf("SSH tunnel broken"),
-	}
+	mockPool := newMockPool()
+	mockPool.stopForwardingErr = fmt.Errorf("SSH tunnel broken")
 	reconciler := &GatewayReconciler{
-		manager: mockManager,
+		pool: mockPool,
 		gateways: map[string]*gateway{
 			"test-ns/test-gw": {
 				listeners: map[string]*Listener{
 					"http": {
-						Hostname: "example.com",
-						Port:     80,
-						Protocol: "HTTP",
+						Hostname:    "example.com",
+						Port:        80,
+						Protocol:    "HTTP",
+						SessionKind: sshmgr.SessionPlain,
 						route: &Route{
 							Name:      "my-route",
 							Namespace: "test-ns",
@@ -2186,7 +2188,7 @@ func TestHandleDeleteGateway_StopForwardingError(t *testing.T) {
 	assert.False(t, exists, "gateway should be deleted despite StopForwarding error")
 
 	// StopForwarding should have been called
-	assert.Len(t, mockManager.stopForwardingCalls, 1)
+	assert.Len(t, mockPool.stopForwardingCalls, 1)
 }
 
 // --- Tests for updateGatewayStatus Status().Update failure ---
@@ -2215,23 +2217,22 @@ func TestUpdateGatewayStatus_StatusUpdateFails(t *testing.T) {
 		}).
 		Build()
 
-	mockManager := &mockSSHTunnelManager{
-		assignedAddrs: map[string][]string{
-			"example.com:80": {"http://example.com"},
-		},
-		connected: true,
+	mockPool := newMockPool()
+	mockPool.assignedAddrs[sshmgr.SessionPlain] = map[string][]string{
+		"example.com:80": {"http://example.com"},
 	}
 
 	reconciler := &GatewayReconciler{
-		Client:  fakeClient,
-		Scheme:  s,
-		manager: mockManager,
+		Client: fakeClient,
+		Scheme: s,
+		pool:   mockPool,
 		gateways: map[string]*gateway{
 			"test-ns/test-gw": {
 				listeners: map[string]*Listener{
 					"http": {
-						Hostname: "example.com",
-						Port:     80,
+						Hostname:    "example.com",
+						Port:        80,
+						SessionKind: sshmgr.SessionPlain,
 					},
 				},
 			},
@@ -2268,15 +2269,12 @@ func TestUpdateGatewayStatusIfChanged_StatusUpdateFails(t *testing.T) {
 		}).
 		Build()
 
-	mockManager := &mockSSHTunnelManager{
-		assignedAddrs: map[string][]string{},
-		connected:     true,
-	}
+	mockPool := newMockPool()
 
 	reconciler := &GatewayReconciler{
-		Client:  fakeClient,
-		Scheme:  s,
-		manager: mockManager,
+		Client: fakeClient,
+		Scheme: s,
+		pool:   mockPool,
 		gateways: map[string]*gateway{
 			"test-ns/test-gw": {
 				listeners: map[string]*Listener{},

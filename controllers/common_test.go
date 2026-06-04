@@ -164,10 +164,12 @@ func TestCreateListener(t *testing.T) {
 			Port:     80,
 		}
 
-		result := createListener(listener)
+		result := createListener(listener, nil)
 		assert.Equal(t, "example.com", result.Hostname)
 		assert.Equal(t, "HTTP", result.Protocol)
 		assert.Equal(t, 80, result.Port)
+		assert.Equal(t, SessionPlain, result.SessionKind)
+		assert.False(t, result.Rejected)
 	})
 
 	t.Run("Listener without hostname", func(t *testing.T) {
@@ -176,10 +178,76 @@ func TestCreateListener(t *testing.T) {
 			Port:     1234,
 		}
 
-		result := createListener(listener)
+		result := createListener(listener, nil)
 		assert.Equal(t, "localhost", result.Hostname)
 		assert.Equal(t, "TCP", result.Protocol)
 		assert.Equal(t, 1234, result.Port)
+		assert.Equal(t, SessionPlain, result.SessionKind)
+		assert.False(t, result.Rejected)
+	})
+
+	t.Run("TCP listener with proxy-protocol annotation", func(t *testing.T) {
+		listener := gatewayv1.Listener{
+			Name:     "tcp-pp",
+			Protocol: "TCP",
+			Port:     8080,
+		}
+		annotations := map[string]string{
+			"ssh-gateway.io/listener-proxy-protocol.tcp-pp": "true",
+		}
+		result := createListener(listener, annotations)
+		assert.Equal(t, SessionProxyProto, result.SessionKind)
+		assert.False(t, result.Rejected)
+	})
+
+	t.Run("TLS listener with Passthrough mode", func(t *testing.T) {
+		mode := gatewayv1.TLSModePassthrough
+		listener := gatewayv1.Listener{
+			Protocol: "TLS",
+			Port:     443,
+			TLS: &gatewayv1.ListenerTLSConfig{
+				Mode: &mode,
+			},
+		}
+		result := createListener(listener, nil)
+		assert.Equal(t, SessionSNIProxy, result.SessionKind)
+		assert.False(t, result.Rejected)
+	})
+
+	t.Run("TLS listener with Terminate mode is rejected", func(t *testing.T) {
+		mode := gatewayv1.TLSModeTerminate
+		listener := gatewayv1.Listener{
+			Protocol: "TLS",
+			Port:     443,
+			TLS: &gatewayv1.ListenerTLSConfig{
+				Mode: &mode,
+			},
+		}
+		result := createListener(listener, nil)
+		assert.True(t, result.Rejected)
+		assert.Equal(t, ReasonUnsupportedTLSMode, result.Reason)
+	})
+
+	t.Run("TLS listener without tls block is rejected as UnsupportedTLSMode", func(t *testing.T) {
+		listener := gatewayv1.Listener{
+			Name:     "tls-broken",
+			Protocol: gatewayv1.TLSProtocolType,
+			Port:     443,
+		}
+		result := createListener(listener, nil)
+		assert.True(t, result.Rejected)
+		assert.Equal(t, ReasonUnsupportedTLSMode, result.Reason)
+		assert.Equal(t, SessionPlain, result.SessionKind) // zero-value, since Rejected
+	})
+
+	t.Run("HTTPS listener is rejected", func(t *testing.T) {
+		listener := gatewayv1.Listener{
+			Protocol: "HTTPS",
+			Port:     443,
+		}
+		result := createListener(listener, nil)
+		assert.True(t, result.Rejected)
+		assert.Equal(t, ReasonUnsupportedListenerProtocol, result.Reason)
 	})
 }
 
@@ -188,25 +256,25 @@ func TestGetSvcHostname(t *testing.T) {
 	assert.Equal(t, "service.namespace.svc.cluster.local", result)
 }
 
-func TestCreateSSHManager_Success(t *testing.T) {
+func TestCreateSSHSessionPool_Success(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	manager, err := createSSHManager(ctx)
+	pool, err := createSSHSessionPool(ctx)
 
-	assert.NoError(t, err, "Expected no error when creating SSH manager")
-	assert.NotNil(t, manager, "Expected SSH manager to be created")
+	assert.NoError(t, err, "Expected no error when creating SSH session pool")
+	assert.NotNil(t, pool, "Expected SSH session pool to be created")
 }
 
-func TestCreateSSHManager_InvalidKey(t *testing.T) {
+func TestCreateSSHSessionPool_InvalidKey(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	keyPath = "invalid-key-path"
-	manager, err := createSSHManager(ctx)
+	pool, err := createSSHSessionPool(ctx)
 
-	assert.Error(t, err, "Expected error when creating SSH manager with invalid key")
-	assert.Nil(t, manager, "Expected SSH manager to be nil")
+	assert.Error(t, err, "Expected error when creating SSH session pool with invalid key")
+	assert.Nil(t, pool, "Expected SSH session pool to be nil")
 }
 
 func TestGetRemoteAddress(t *testing.T) {
