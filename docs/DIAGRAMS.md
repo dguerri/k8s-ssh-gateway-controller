@@ -9,6 +9,7 @@ This directory contains comprehensive Graphviz diagrams documenting the SSH Gate
 **Purpose**: Clean, easy-to-follow diagram showing main components and primary flows.
 
 **Key Elements**:
+
 - Main components (Gateway Controller, Route Controllers including TLSRoute, SSH Session Pool with up to three per-kind managers)
 - Primary data flows with clear labels, including the fan-out from the pool to plain / pp / sni sessions on the SSH server
 - Three key scenarios visualized:
@@ -20,6 +21,7 @@ This directory contains comprehensive Graphviz diagrams documenting the SSH Gate
 **Best for**: Getting started, presentations, and understanding the big picture.
 
 **Render**:
+
 ```bash
 dot -Tpng docs/simplified-architecture.dot -o docs/simplified-architecture.png
 dot -Tsvg docs/simplified-architecture.dot -o docs/simplified-architecture.svg
@@ -30,6 +32,7 @@ dot -Tsvg docs/simplified-architecture.dot -o docs/simplified-architecture.svg
 **Purpose**: Shows the overall system architecture with component responsibilities and data flows.
 
 **Key Elements**:
+
 - Kubernetes resources (GatewayClass, Gateway, HTTPRoute, TCPRoute, TLSRoute)
 - Controller layer (Route Controllers including TLSRoute, Gateway Controller)
 - SSH layer (SSH Session Pool wrapping 1..3 SSH Tunnel Managers)
@@ -39,6 +42,7 @@ dot -Tsvg docs/simplified-architecture.dot -o docs/simplified-architecture.svg
 **Best for**: Understanding overall system design and component interactions.
 
 **Render**:
+
 ```bash
 dot -Tpng docs/high-level-architecture.dot -o docs/high-level-architecture.png
 dot -Tsvg docs/high-level-architecture.dot -o docs/high-level-architecture.svg
@@ -49,6 +53,7 @@ dot -Tsvg docs/high-level-architecture.dot -o docs/high-level-architecture.svg
 **Purpose**: Shows detailed function calls and internal component structure with **color-coded flows**.
 
 **Key Elements**:
+
 - All major functions in each controller
 - Internal state management (maps, mutexes)
 - Function call flows with color coding:
@@ -64,6 +69,7 @@ dot -Tsvg docs/high-level-architecture.dot -o docs/high-level-architecture.svg
 **Best for**: Understanding implementation details, debugging, and following specific flow types.
 
 **Render**:
+
 ```bash
 dot -Tpng docs/architecture-diagram.dot -o docs/architecture-diagram.png
 dot -Tsvg docs/architecture-diagram.dot -o docs/architecture-diagram.svg
@@ -74,6 +80,7 @@ dot -Tsvg docs/architecture-diagram.dot -o docs/architecture-diagram.svg
 **Purpose**: Documents state management, data structures, and critical scenarios.
 
 **Key Elements**:
+
 - State stores in Gateway Controller and SSH Session Pool (one per session kind)
 - Route → SessionKind mapping (HTTP→plain, TCP→plain/pp, TLS Passthrough→sni)
 - Three critical scenarios:
@@ -87,6 +94,7 @@ dot -Tsvg docs/architecture-diagram.dot -o docs/architecture-diagram.svg
 **Best for**: Understanding state consistency, recovery flows, and edge cases.
 
 **Render**:
+
 ```bash
 dot -Tpng docs/state-and-data-flow.dot -o docs/state-and-data-flow.png
 dot -Tsvg docs/state-and-data-flow.dot -o docs/state-and-data-flow.svg
@@ -94,11 +102,11 @@ dot -Tsvg docs/state-and-data-flow.dot -o docs/state-and-data-flow.svg
 
 ## Quick Reference
 
-| Diagram | Use When | Complexity |
-|---------|----------|------------|
-| **Simplified** | First time learning, presentations | ⭐ Simple |
-| **High-Level** | Understanding architecture, design reviews | ⭐⭐ Medium |
-| **Detailed** | Debugging, implementation details | ⭐⭐⭐ Complex |
+| Diagram        | Use When                                   | Complexity     |
+|----------------|--------------------------------------------|----------------|
+| **Simplified** | First time learning, presentations         | ⭐ Simple      |
+| **High-Level** | Understanding architecture, design reviews | ⭐⭐ Medium    |
+| **Detailed**   | Debugging, implementation details          | ⭐⭐⭐ Complex |
 | **State Flow** | Understanding state management, edge cases | ⭐⭐⭐ Complex |
 
 ## Rendering All Diagrams
@@ -128,14 +136,17 @@ echo "✓ All diagrams rendered"
 ## Viewing Diagrams
 
 ### Online Viewers
+
 - Upload `.dot` files to [Graphviz Online](https://dreampuf.github.io/GraphvizOnline/)
 - Use [Edotor](https://edotor.net/) for editing and viewing
 
 ### VS Code
+
 - Install "Graphviz Preview" extension
 - Open `.dot` file and use preview pane
 
 ### Command Line
+
 ```bash
 # View directly (macOS)
 dot -Tpng architecture-diagram.dot | open -f -a Preview
