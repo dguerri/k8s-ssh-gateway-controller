@@ -1,10 +1,20 @@
 package controllers
 
 import (
+	"context"
+	"fmt"
 	"testing"
 
+	sshmgr "github.com/dguerri/k8s-ssh-gateway-controller/ssh"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 )
@@ -318,4 +328,568 @@ func TestGetTLSRouteFinalizer(t *testing.T) {
 	if got != want {
 		t.Fatalf("unexpected finalizer: %s (want %s)", got, want)
 	}
+}
+
+// --- TLSRoute Reconciler full flow tests ---
+
+// newTLSRouteForTest returns a valid TLSRoute pointing at the named gateway/listener
+// with a single backend service reference.
+func newTLSRouteForTest(name, namespace, gwName, listenerName, backendName string, backendPort int32, finalizers []string) *gatewayv1alpha2.TLSRoute {
+	sn := gatewayv1.SectionName(listenerName)
+	p := gatewayv1.PortNumber(backendPort)
+	return &gatewayv1alpha2.TLSRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       name,
+			Namespace:  namespace,
+			Finalizers: finalizers,
+		},
+		Spec: gatewayv1alpha2.TLSRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{
+					Name:        gatewayv1.ObjectName(gwName),
+					SectionName: &sn,
+				}},
+			},
+			Rules: []gatewayv1alpha2.TLSRouteRule{{
+				BackendRefs: []gatewayv1.BackendRef{{
+					BackendObjectReference: gatewayv1.BackendObjectReference{
+						Name: gatewayv1.ObjectName(backendName),
+						Port: &p,
+					},
+				}},
+			}},
+		},
+	}
+}
+
+// newTLSGatewayReconcilerForTest builds a GatewayReconciler whose mock pool has
+// the SNI passthrough session marked connected (or not, when connected=false).
+// The single TLS listener is registered under default/test-gw.
+func newTLSGatewayReconcilerForTest(connected bool, listeners map[string]*Listener) (*GatewayReconciler, *mockSSHSessionPool) {
+	pool := newMockPool()
+	if connected {
+		pool.connectedKinds[sshmgr.SessionSNIProxy] = true
+	} else {
+		delete(pool.connectedKinds, sshmgr.SessionSNIProxy)
+		pool.connectShouldFail = true
+	}
+	gw := &GatewayReconciler{
+		pool: pool,
+		gateways: map[string]*gateway{
+			"default/test-gw": {
+				listeners: listeners,
+			},
+		},
+	}
+	return gw, pool
+}
+
+func TestTLSRouteReconcile_RouteNotFound(t *testing.T) {
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
+
+	s := newRouteTestScheme()
+	fakeClient := fake.NewClientBuilder().WithScheme(s).Build()
+
+	gwReconciler, _ := newTLSGatewayReconcilerForTest(true, map[string]*Listener{})
+
+	reconciler := &TLSRouteReconciler{
+		Client:            fakeClient,
+		Scheme:            s,
+		GatewayReconciler: gwReconciler,
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "nonexistent-route", Namespace: "default"},
+	})
+
+	assert.NoError(t, err, "reconcile should return no error for not-found route")
+	assert.Equal(t, ctrl.Result{}, result)
+}
+
+func TestTLSRouteReconcile_UnmanagedGateway(t *testing.T) {
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
+
+	s := newRouteTestScheme()
+
+	gwClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-class"},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: "other.com/controller"},
+	}
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-gw", Namespace: "default"},
+		Spec:       gatewayv1.GatewaySpec{GatewayClassName: "other-class"},
+	}
+	tlsRoute := newTLSRouteForTest("test-tls-route", "default", "test-gw", "tls-listener", "backend-svc", 443, nil)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(gwClass, gw, tlsRoute).Build()
+	gwReconciler, _ := newTLSGatewayReconcilerForTest(true, map[string]*Listener{})
+
+	reconciler := &TLSRouteReconciler{
+		Client:            fakeClient,
+		Scheme:            s,
+		GatewayReconciler: gwReconciler,
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-tls-route", Namespace: "default"},
+	})
+
+	assert.NoError(t, err, "unmanaged gateway should not produce an error")
+	assert.Equal(t, ctrl.Result{}, result)
+
+	// Verify no finalizer was added
+	var updatedRoute gatewayv1alpha2.TLSRoute
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-tls-route", Namespace: "default"}, &updatedRoute)
+	require.NoError(t, err)
+	assert.Empty(t, updatedRoute.Finalizers, "no finalizer should be added for unmanaged gateway")
+}
+
+func TestTLSRouteReconcile_SuccessfulAdd(t *testing.T) {
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
+
+	s := newRouteTestScheme()
+
+	gwClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "managed-class"},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: "example.com/gateway-controller"},
+	}
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-gw", Namespace: "default"},
+		Spec:       gatewayv1.GatewaySpec{GatewayClassName: "managed-class"},
+	}
+	tlsRoute := newTLSRouteForTest("test-tls-route", "default", "test-gw", "tls-listener", "backend-svc", 443, nil)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(gwClass, gw, tlsRoute).Build()
+
+	gwReconciler, pool := newTLSGatewayReconcilerForTest(true, map[string]*Listener{
+		"tls-listener": {
+			Hostname:    "example.com",
+			Port:        443,
+			Protocol:    "TLS",
+			SessionKind: sshmgr.SessionSNIProxy,
+		},
+	})
+
+	reconciler := &TLSRouteReconciler{
+		Client:            fakeClient,
+		Scheme:            s,
+		GatewayReconciler: gwReconciler,
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-tls-route", Namespace: "default"},
+	})
+
+	assert.NoError(t, err, "successful add should not return error")
+	assert.Equal(t, routeReconcilePeriod, result.RequeueAfter, "should requeue after routeReconcilePeriod")
+
+	// Verify finalizer was added
+	var updatedRoute gatewayv1alpha2.TLSRoute
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-tls-route", Namespace: "default"}, &updatedRoute)
+	require.NoError(t, err)
+	assert.Contains(t, updatedRoute.Finalizers, getTLSRouteFinalizer(), "finalizer should be added")
+
+	// Verify route was set on the listener
+	gw2 := gwReconciler.gateways["default/test-gw"]
+	listener := gw2.listeners["tls-listener"]
+	require.NotNil(t, listener.route, "route should be attached to listener")
+	assert.Equal(t, "test-tls-route", listener.route.Name)
+	assert.Equal(t, "default", listener.route.Namespace)
+	assert.Equal(t, 443, listener.route.Port)
+
+	// Verify StartForwarding was called against the SNI session kind
+	require.Len(t, pool.startForwardingCalls, 1, "StartForwarding should be invoked exactly once")
+	assert.Equal(t, sshmgr.SessionSNIProxy, pool.startForwardingCalls[0].Kind, "StartForwarding should target SNI session")
+}
+
+func TestTLSRouteReconcile_DeletionWithFinalizer(t *testing.T) {
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
+
+	s := newRouteTestScheme()
+
+	gwClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "managed-class"},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: "example.com/gateway-controller"},
+	}
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-gw", Namespace: "default"},
+		Spec:       gatewayv1.GatewaySpec{GatewayClassName: "managed-class"},
+	}
+	tlsRoute := newTLSRouteForTest("test-tls-route", "default", "test-gw", "tls-listener", "backend-svc", 443, []string{getTLSRouteFinalizer()})
+
+	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(gwClass, gw, tlsRoute).Build()
+
+	// Issue a delete to set the DeletionTimestamp (the finalizer keeps the object alive)
+	err := fakeClient.Delete(context.Background(), tlsRoute)
+	require.NoError(t, err, "delete should succeed")
+
+	backendHost := getSvcHostname("backend-svc", "default")
+	gwReconciler, pool := newTLSGatewayReconcilerForTest(true, map[string]*Listener{
+		"tls-listener": {
+			Hostname:    "example.com",
+			Port:        443,
+			Protocol:    "TLS",
+			SessionKind: sshmgr.SessionSNIProxy,
+			route: &Route{
+				Name:      "test-tls-route",
+				Namespace: "default",
+				Host:      backendHost,
+				Port:      443,
+			},
+		},
+	})
+
+	reconciler := &TLSRouteReconciler{
+		Client:            fakeClient,
+		Scheme:            s,
+		GatewayReconciler: gwReconciler,
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-tls-route", Namespace: "default"},
+	})
+
+	assert.NoError(t, err, "deletion with finalizer should not return error")
+	assert.Equal(t, routeReconcilePeriod, result.RequeueAfter, "should requeue after routeReconcilePeriod")
+
+	// Verify route was removed from listener
+	gw2 := gwReconciler.gateways["default/test-gw"]
+	listener := gw2.listeners["tls-listener"]
+	assert.Nil(t, listener.route, "route should be removed from listener")
+
+	// Verify StopForwarding was called against the SNI session kind
+	require.Len(t, pool.stopForwardingCalls, 1, "StopForwarding should be invoked exactly once")
+	assert.Equal(t, sshmgr.SessionSNIProxy, pool.stopForwardingCalls[0].Kind, "StopForwarding should target SNI session")
+}
+
+func TestTLSRouteReconcile_GatewayNotReadyRetries(t *testing.T) {
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
+
+	s := newRouteTestScheme()
+
+	gwClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "managed-class"},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: "example.com/gateway-controller"},
+	}
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-gw", Namespace: "default"},
+		Spec:       gatewayv1.GatewaySpec{GatewayClassName: "managed-class"},
+	}
+	tlsRoute := newTLSRouteForTest("test-tls-route", "default", "test-gw", "tls-listener", "backend-svc", 443, nil)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(gwClass, gw, tlsRoute).Build()
+
+	// SNI session not connected -> SetRoute -> setupRouteForwarding returns ErrGatewayNotReady
+	gwReconciler, _ := newTLSGatewayReconcilerForTest(false, map[string]*Listener{
+		"tls-listener": {
+			Hostname:    "example.com",
+			Port:        443,
+			Protocol:    "TLS",
+			SessionKind: sshmgr.SessionSNIProxy,
+		},
+	})
+
+	reconciler := &TLSRouteReconciler{
+		Client:            fakeClient,
+		Scheme:            s,
+		GatewayReconciler: gwReconciler,
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-tls-route", Namespace: "default"},
+	})
+
+	assert.Error(t, err, "should return error when SNI session is not ready")
+	assert.Equal(t, ctrl.Result{}, result, "result should be empty when error is returned for backoff")
+
+	var notReadyErr *ErrGatewayNotReady
+	assert.ErrorAs(t, err, &notReadyErr, "error should be ErrGatewayNotReady")
+}
+
+// --- TLSRoute Reconciler branch-coverage tests ---
+
+func TestTLSRouteReconcile_DeletionWithoutFinalizer(t *testing.T) {
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
+
+	s := newRouteTestScheme()
+
+	tlsRoute := newTLSRouteForTest("test-tls-route", "default", "test-gw", "tls-listener", "backend-svc", 443, []string{"some-other-finalizer"})
+
+	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(tlsRoute).Build()
+
+	// Issue a delete to set the DeletionTimestamp (some-other-finalizer keeps the object alive)
+	err := fakeClient.Delete(context.Background(), tlsRoute)
+	require.NoError(t, err, "delete should succeed")
+
+	gwReconciler, _ := newTLSGatewayReconcilerForTest(true, map[string]*Listener{})
+
+	reconciler := &TLSRouteReconciler{
+		Client:            fakeClient,
+		Scheme:            s,
+		GatewayReconciler: gwReconciler,
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-tls-route", Namespace: "default"},
+	})
+
+	assert.NoError(t, err, "deletion without our finalizer should succeed without error")
+	assert.Equal(t, ctrl.Result{}, result, "should return empty result when route is being deleted without our finalizer")
+}
+
+func TestTLSRouteReconcile_ExtractDetailsFails(t *testing.T) {
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
+
+	s := newRouteTestScheme()
+
+	tlsRoute := &gatewayv1alpha2.TLSRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "bad-route", Namespace: "default"},
+		Spec:       gatewayv1alpha2.TLSRouteSpec{},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(tlsRoute).Build()
+
+	gwReconciler, _ := newTLSGatewayReconcilerForTest(true, map[string]*Listener{})
+
+	reconciler := &TLSRouteReconciler{
+		Client:            fakeClient,
+		Scheme:            s,
+		GatewayReconciler: gwReconciler,
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "bad-route", Namespace: "default"},
+	})
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "must have at least one ParentRef")
+	assert.Equal(t, ctrl.Result{}, result)
+}
+
+func TestTLSRouteReconcile_IsGatewayManagedError(t *testing.T) {
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
+
+	s := newRouteTestScheme()
+
+	tlsRoute := newTLSRouteForTest("test-tls-route", "default", "test-gw", "tls-listener", "backend-svc", 443, nil)
+
+	baseFakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(tlsRoute).Build()
+
+	// errorReturningClient is defined in route_controller_test.go and shared package-wide.
+	errClient := &errorReturningClient{
+		Client:       baseFakeClient,
+		gatewayError: fmt.Errorf("simulated API error: permission denied"),
+	}
+
+	gwReconciler, _ := newTLSGatewayReconcilerForTest(true, map[string]*Listener{})
+
+	reconciler := &TLSRouteReconciler{
+		Client:            errClient,
+		Scheme:            s,
+		GatewayReconciler: gwReconciler,
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-tls-route", Namespace: "default"},
+	})
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "simulated API error")
+	assert.Equal(t, ctrl.Result{}, result)
+}
+
+func TestTLSRouteReconcile_HandleAddOrUpdate_FinalizerUpdateFails(t *testing.T) {
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
+
+	s := newRouteTestScheme()
+
+	gwClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "managed-class"},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: "example.com/gateway-controller"},
+	}
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-gw", Namespace: "default"},
+		Spec:       gatewayv1.GatewaySpec{GatewayClassName: "managed-class"},
+	}
+	tlsRoute := newTLSRouteForTest("test-tls-route", "default", "test-gw", "tls-listener", "backend-svc", 443, nil)
+
+	baseFakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(gwClass, gw, tlsRoute).Build()
+
+	wrappedClient := interceptor.NewClient(baseFakeClient, interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			return fmt.Errorf("simulated finalizer update failure")
+		},
+	})
+
+	gwReconciler, _ := newTLSGatewayReconcilerForTest(true, map[string]*Listener{
+		"tls-listener": {Hostname: "example.com", Port: 443, Protocol: "TLS", SessionKind: sshmgr.SessionSNIProxy},
+	})
+
+	reconciler := &TLSRouteReconciler{
+		Client:            wrappedClient,
+		Scheme:            s,
+		GatewayReconciler: gwReconciler,
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-tls-route", Namespace: "default"},
+	})
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "simulated finalizer update failure")
+	assert.Equal(t, ctrl.Result{}, result)
+}
+
+func TestTLSRouteReconcile_HandleAddOrUpdate_SetRouteGenericError(t *testing.T) {
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
+
+	s := newRouteTestScheme()
+
+	gwClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "managed-class"},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: "example.com/gateway-controller"},
+	}
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-gw", Namespace: "default"},
+		Spec:       gatewayv1.GatewaySpec{GatewayClassName: "managed-class"},
+	}
+	tlsRoute := newTLSRouteForTest("test-tls-route", "default", "test-gw", "tls-listener", "backend-svc", 443, nil)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(gwClass, gw, tlsRoute).Build()
+
+	mockPool := newMockPool()
+	mockPool.connectedKinds[sshmgr.SessionSNIProxy] = true
+	mockPool.startForwardingErr = fmt.Errorf("generic SSH error")
+	gwReconciler := &GatewayReconciler{
+		pool: mockPool,
+		gateways: map[string]*gateway{
+			"default/test-gw": {
+				listeners: map[string]*Listener{
+					"tls-listener": {Hostname: "example.com", Port: 443, Protocol: "TLS", SessionKind: sshmgr.SessionSNIProxy},
+				},
+			},
+		},
+	}
+
+	reconciler := &TLSRouteReconciler{
+		Client:            fakeClient,
+		Scheme:            s,
+		GatewayReconciler: gwReconciler,
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-tls-route", Namespace: "default"},
+	})
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to start forwarding")
+	assert.Equal(t, ctrl.Result{}, result)
+}
+
+func TestTLSRouteReconcile_HandleDeletion_RemoveRouteGenericError(t *testing.T) {
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
+
+	s := newRouteTestScheme()
+
+	gwClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "managed-class"},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: "example.com/gateway-controller"},
+	}
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-gw", Namespace: "default"},
+		Spec:       gatewayv1.GatewaySpec{GatewayClassName: "managed-class"},
+	}
+	tlsRoute := newTLSRouteForTest("test-tls-route", "default", "test-gw", "tls-listener", "backend-svc", 443, []string{getTLSRouteFinalizer()})
+
+	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(gwClass, gw, tlsRoute).Build()
+
+	err := fakeClient.Delete(context.Background(), tlsRoute)
+	require.NoError(t, err)
+
+	backendHost := getSvcHostname("backend-svc", "default")
+	mockPool := newMockPool()
+	mockPool.connectedKinds[sshmgr.SessionSNIProxy] = true
+	mockPool.stopForwardingErr = fmt.Errorf("SSH tunnel broken")
+	gwReconciler := &GatewayReconciler{
+		pool: mockPool,
+		gateways: map[string]*gateway{
+			"default/test-gw": {
+				listeners: map[string]*Listener{
+					"tls-listener": {
+						Hostname:    "example.com",
+						Port:        443,
+						Protocol:    "TLS",
+						SessionKind: sshmgr.SessionSNIProxy,
+						route: &Route{
+							Name:      "test-tls-route",
+							Namespace: "default",
+							Host:      backendHost,
+							Port:      443,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	reconciler := &TLSRouteReconciler{
+		Client:            fakeClient,
+		Scheme:            s,
+		GatewayReconciler: gwReconciler,
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-tls-route", Namespace: "default"},
+	})
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to stop forwarding")
+	assert.Equal(t, ctrl.Result{}, result)
+}
+
+func TestTLSRouteReconcile_HandleDeletion_UpdateFinalizerFails(t *testing.T) {
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
+
+	s := newRouteTestScheme()
+
+	gwClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "managed-class"},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: "example.com/gateway-controller"},
+	}
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-gw", Namespace: "default"},
+		Spec:       gatewayv1.GatewaySpec{GatewayClassName: "managed-class"},
+	}
+	tlsRoute := newTLSRouteForTest("test-tls-route", "default", "test-gw", "tls-listener", "backend-svc", 443, []string{getTLSRouteFinalizer()})
+
+	baseFakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(gwClass, gw, tlsRoute).Build()
+
+	err := baseFakeClient.Delete(context.Background(), tlsRoute)
+	require.NoError(t, err)
+
+	wrappedClient := interceptor.NewClient(baseFakeClient, interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			return fmt.Errorf("simulated update failure")
+		},
+	})
+
+	// Empty gateways map -> RemoveRoute returns ErrGatewayNotFound (tolerated by handleDeletion)
+	gwReconciler := &GatewayReconciler{
+		pool:     newMockPool(),
+		gateways: map[string]*gateway{},
+	}
+
+	reconciler := &TLSRouteReconciler{
+		Client:            wrappedClient,
+		Scheme:            s,
+		GatewayReconciler: gwReconciler,
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-tls-route", Namespace: "default"},
+	})
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "simulated update failure")
+	assert.Equal(t, ctrl.Result{}, result)
 }
