@@ -815,7 +815,7 @@ func (r *GatewayReconciler) handleDeleteGateway(_ context.Context, k8sGw *gatewa
 		gw.listenersMu.Lock()
 		defer gw.listenersMu.Unlock()
 		// Delete listeners and stop forwardings
-		for _, listener := range gw.listeners {
+		for name, listener := range gw.listeners {
 			if listener.route != nil {
 				err := r.pool.StopForwarding(listener.SessionKind, &sshmgr.ForwardingConfig{
 					RemoteHost:   listener.Hostname,
@@ -829,7 +829,7 @@ func (r *GatewayReconciler) handleDeleteGateway(_ context.Context, k8sGw *gatewa
 					slog.With("function", "handleDeleteGateway").Debug("stopped forwarding for listener", "listener", listener.Hostname)
 				}
 			}
-			delete(gw.listeners, listener.Hostname)
+			delete(gw.listeners, name)
 		}
 		delete(r.gateways, gwKey)
 		slog.With("function", "handleDeleteGateway").Debug("SSHSessionPool: stopped forwarding for Gateway", "gateway", gwKey)

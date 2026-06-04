@@ -2674,3 +2674,57 @@ func TestGatewayProgrammed_OneListenerNotProgrammed(t *testing.T) {
 	assert.Equal(t, metav1.ConditionFalse, listenerCondMap["tls"].Status)
 	assert.Equal(t, ReasonSessionNotEnabled, listenerCondMap["tls"].Reason)
 }
+
+// TestHandleDeleteGateway_DeletesListenerByName is a regression test for a latent
+// bug where handleDeleteGateway deleted listener map entries by Hostname instead
+// of by the map key (the listener Name). For TCP/TLS listeners the Hostname
+// differs from the Name (or is empty), so the inner delete was a no-op that would
+// leak listener entries if listener lifetime were ever extended past gateway
+// deletion. We hold a reference to the gateway struct so we can assert the inner
+// delete actually clears gw.listeners, independent of the outer map cleanup.
+func TestHandleDeleteGateway_DeletesListenerByName(t *testing.T) {
+	mockPool := newMockPool()
+	gw := &gateway{
+		listeners: map[string]*Listener{
+			"tcp-listener": {
+				Hostname:    "", // TCP listener: hostname differs from the map key
+				Port:        8080,
+				Protocol:    "TCP",
+				SessionKind: sshmgr.SessionPlain,
+				route: &Route{
+					Name:      "my-tcp-route",
+					Namespace: "test-ns",
+					Host:      "backend",
+					Port:      9090,
+				},
+			},
+		},
+	}
+	reconciler := &GatewayReconciler{
+		pool: mockPool,
+		gateways: map[string]*gateway{
+			"test-ns/test-gw": gw,
+		},
+	}
+
+	k8sGw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gw",
+			Namespace: "test-ns",
+		},
+	}
+
+	reconciler.handleDeleteGateway(context.TODO(), k8sGw)
+
+	// Gateway should be removed from the registry.
+	_, exists := reconciler.gateways["test-ns/test-gw"]
+	assert.False(t, exists)
+
+	// The inner delete must have cleared the listener entry even though the
+	// listener's Hostname does not match its map key.
+	assert.Empty(t, gw.listeners, "listener entry should be removed by name")
+
+	// StopForwarding should still have been called for the active route.
+	assert.Len(t, mockPool.stopForwardingCalls, 1)
+	assert.Equal(t, 8080, mockPool.stopForwardingCalls[0].Cfg.RemotePort)
+}
