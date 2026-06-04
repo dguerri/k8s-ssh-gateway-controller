@@ -1808,7 +1808,8 @@ func TestUpdateGatewayStatusIfChanged(t *testing.T) {
 		err := fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "test-ns", Name: "test-gw"}, &fresh)
 		assert.NoError(t, err)
 
-		err = reconciler.updateGatewayStatusIfChanged(context.Background(), &fresh, "test-ns/test-gw")
+		gc := &gatewayv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: "my-class"}}
+		err = reconciler.updateGatewayStatusIfChanged(context.Background(), &fresh, gc, "test-ns/test-gw")
 		assert.NoError(t, err)
 
 		// Verify conditions were set
@@ -1883,7 +1884,8 @@ func TestUpdateGatewayStatusIfChanged(t *testing.T) {
 		err := fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "test-ns", Name: "test-gw"}, &fresh)
 		assert.NoError(t, err)
 
-		err = reconciler2.updateGatewayStatusIfChanged(context.Background(), &fresh, "test-ns/test-gw")
+		gc2 := &gatewayv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: "my-class"}}
+		err = reconciler2.updateGatewayStatusIfChanged(context.Background(), &fresh, gc2, "test-ns/test-gw")
 		assert.NoError(t, err)
 
 		// Verify addresses were updated
@@ -1966,7 +1968,8 @@ func TestUpdateGatewayStatusIfChanged(t *testing.T) {
 		assert.NoError(t, err)
 
 		// This should succeed without error; conditions and addresses unchanged
-		err = reconciler3.updateGatewayStatusIfChanged(context.Background(), &fresh, "test-ns/test-gw")
+		gc3 := &gatewayv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: "my-class"}}
+		err = reconciler3.updateGatewayStatusIfChanged(context.Background(), &fresh, gc3, "test-ns/test-gw")
 		assert.NoError(t, err)
 	})
 }
@@ -2288,7 +2291,8 @@ func TestUpdateGatewayStatusIfChanged_StatusUpdateFails(t *testing.T) {
 	assert.NoError(t, err)
 
 	// This should fail because conditions will change (first time setting Accepted/Programmed)
-	err = reconciler.updateGatewayStatusIfChanged(context.Background(), &fresh, "test-ns/test-gw")
+	gcFail := &gatewayv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: "my-class"}}
+	err = reconciler.updateGatewayStatusIfChanged(context.Background(), &fresh, gcFail, "test-ns/test-gw")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "simulated status update failure")
 }
@@ -2330,4 +2334,337 @@ func TestGatewayClassReconciler_Reconcile_StatusUpdateFails(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to update GatewayClass status")
 	assert.Equal(t, ctrl.Result{}, result)
+}
+
+// --- Tests for listenerProgrammedCondition (Task 7) ---
+
+func TestListenerProgrammed_RejectsUnsupportedTLSMode(t *testing.T) {
+	mockPool := newMockPool()
+	reconciler := &GatewayReconciler{pool: mockPool}
+
+	l := &Listener{
+		Hostname:    "example.com",
+		Port:        443,
+		Protocol:    "TLS",
+		SessionKind: SessionPlain,
+		Rejected:    true,
+		Reason:      ReasonUnsupportedTLSMode,
+	}
+	sessions := ClassSessionConfig{}
+
+	cond := reconciler.listenerProgrammedCondition(l, sessions)
+
+	assert.Equal(t, string(gatewayv1.ListenerConditionProgrammed), cond.Type)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, ReasonUnsupportedTLSMode, cond.Reason)
+	assert.Contains(t, cond.Message, "Listener rejected")
+}
+
+func TestListenerProgrammed_RejectsHTTPS(t *testing.T) {
+	mockPool := newMockPool()
+	reconciler := &GatewayReconciler{pool: mockPool}
+
+	l := &Listener{
+		Hostname:    "example.com",
+		Port:        443,
+		Protocol:    "HTTPS",
+		SessionKind: SessionPlain,
+		Rejected:    true,
+		Reason:      ReasonUnsupportedListenerProtocol,
+	}
+	sessions := ClassSessionConfig{}
+
+	cond := reconciler.listenerProgrammedCondition(l, sessions)
+
+	assert.Equal(t, string(gatewayv1.ListenerConditionProgrammed), cond.Type)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, ReasonUnsupportedListenerProtocol, cond.Reason)
+}
+
+func TestListenerProgrammed_SessionNotEnabledForPP(t *testing.T) {
+	mockPool := newMockPool()
+	reconciler := &GatewayReconciler{pool: mockPool}
+
+	// TCP listener that requires PP but GatewayClass has ProxyProtocolVersion=0
+	l := &Listener{
+		Hostname:    "localhost",
+		Port:        3306,
+		Protocol:    "TCP",
+		SessionKind: SessionProxyProto,
+	}
+	sessions := ClassSessionConfig{ProxyProtocolVersion: 0, SNIProxyEnabled: false}
+
+	cond := reconciler.listenerProgrammedCondition(l, sessions)
+
+	assert.Equal(t, string(gatewayv1.ListenerConditionProgrammed), cond.Type)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, ReasonSessionNotEnabled, cond.Reason)
+	assert.Contains(t, cond.Message, "proxy-protocol")
+}
+
+func TestListenerProgrammed_SessionNotEnabledForSNI(t *testing.T) {
+	mockPool := newMockPool()
+	reconciler := &GatewayReconciler{pool: mockPool}
+
+	// TLS Passthrough listener requiring SNI but GatewayClass has SNIProxyEnabled=false
+	l := &Listener{
+		Hostname:    "example.com",
+		Port:        443,
+		Protocol:    "TLS",
+		SessionKind: SessionSNIProxy,
+	}
+	sessions := ClassSessionConfig{ProxyProtocolVersion: 0, SNIProxyEnabled: false}
+
+	cond := reconciler.listenerProgrammedCondition(l, sessions)
+
+	assert.Equal(t, string(gatewayv1.ListenerConditionProgrammed), cond.Type)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, ReasonSessionNotEnabled, cond.Reason)
+	assert.Contains(t, cond.Message, "sni-proxy")
+}
+
+func TestListenerProgrammed_PendingWhenPoolNotConnected(t *testing.T) {
+	mockPool := newMockPool()
+	// Disconnect the plain session
+	delete(mockPool.connectedKinds, sshmgr.SessionPlain)
+	reconciler := &GatewayReconciler{pool: mockPool}
+
+	l := &Listener{
+		Hostname:    "example.com",
+		Port:        80,
+		Protocol:    "HTTP",
+		SessionKind: SessionPlain,
+	}
+	sessions := ClassSessionConfig{}
+
+	cond := reconciler.listenerProgrammedCondition(l, sessions)
+
+	assert.Equal(t, string(gatewayv1.ListenerConditionProgrammed), cond.Type)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, string(gatewayv1.ListenerReasonPending), cond.Reason)
+}
+
+func TestListenerProgrammed_HappyPath(t *testing.T) {
+	mockPool := newMockPool()
+	reconciler := &GatewayReconciler{pool: mockPool}
+
+	l := &Listener{
+		Hostname:    "example.com",
+		Port:        80,
+		Protocol:    "HTTP",
+		SessionKind: SessionPlain,
+	}
+	sessions := ClassSessionConfig{}
+
+	cond := reconciler.listenerProgrammedCondition(l, sessions)
+
+	assert.Equal(t, string(gatewayv1.ListenerConditionProgrammed), cond.Type)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, string(gatewayv1.ListenerReasonProgrammed), cond.Reason)
+}
+
+// --- Tests for Gateway-level Programmed aggregation (Task 7) ---
+
+// TestSupportedKindsFor verifies supportedKindsFor helper covers all branches.
+func TestSupportedKindsFor(t *testing.T) {
+	tests := []struct {
+		protocol string
+		wantKind string
+		wantNil  bool
+	}{
+		{"HTTP", "HTTPRoute", false},
+		{"TCP", "TCPRoute", false},
+		{"TLS", "TLSRoute", false},
+		{"HTTPS", "", true},  // unknown → nil
+		{"UDP", "", true},    // unknown → nil
+	}
+	for _, tt := range tests {
+		t.Run(tt.protocol, func(t *testing.T) {
+			l := &Listener{Protocol: tt.protocol}
+			got := supportedKindsFor(l)
+			if tt.wantNil {
+				assert.Nil(t, got)
+			} else {
+				assert.Len(t, got, 1)
+				assert.Equal(t, gatewayv1.Kind(tt.wantKind), got[0].Kind)
+			}
+		})
+	}
+}
+
+// TestPopulateListenerStatuses_GatewayNotFound verifies the early-return path when
+// the gateway key is absent from r.gateways.
+func TestPopulateListenerStatuses_GatewayNotFound(t *testing.T) {
+	mockPool := newMockPool()
+	reconciler := &GatewayReconciler{
+		pool:     mockPool,
+		gateways: map[string]*gateway{}, // empty — key won't be found
+	}
+
+	k8sGw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "missing-gw", Namespace: "test-ns"},
+		Spec:       gatewayv1.GatewaySpec{GatewayClassName: "my-class"},
+	}
+	gc := &gatewayv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: "my-class"}}
+
+	allProgrammed := reconciler.populateListenerStatuses(k8sGw, gc)
+	// Early return → allProgrammed=true, no listener statuses written
+	assert.True(t, allProgrammed)
+	assert.Nil(t, k8sGw.Status.Listeners)
+}
+
+func TestGatewayProgrammed_AllListenersProgrammed(t *testing.T) {
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "test-controller")
+	s := newGatewayTestScheme()
+
+	gc := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-class"},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: "test-controller"},
+	}
+	hostname := gatewayv1.Hostname("example.com")
+	k8sGw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-gw", Namespace: "test-ns"},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "my-class",
+			Listeners: []gatewayv1.Listener{
+				{Name: "http", Hostname: &hostname, Port: 80, Protocol: "HTTP"},
+				{Name: "tcp", Port: 3306, Protocol: "TCP"},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(gc, k8sGw).
+		WithStatusSubresource(&gatewayv1.Gateway{}).
+		Build()
+
+	mockPool := newMockPool() // plain connected by default
+
+	reconciler := &GatewayReconciler{
+		Client: fakeClient,
+		Scheme: s,
+		pool:   mockPool,
+		gateways: map[string]*gateway{
+			"test-ns/test-gw": {
+				listeners: map[string]*Listener{
+					"http": {Hostname: "example.com", Port: 80, Protocol: "HTTP", SessionKind: sshmgr.SessionPlain},
+					"tcp":  {Hostname: "localhost", Port: 3306, Protocol: "TCP", SessionKind: sshmgr.SessionPlain},
+				},
+			},
+		},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "test-ns", Name: "test-gw"},
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, gatewayReconcilePeriod, result.RequeueAfter)
+
+	var updated gatewayv1.Gateway
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "test-ns", Name: "test-gw"}, &updated)
+	assert.NoError(t, err)
+
+	// Gateway-level Programmed should be True
+	var progCond *metav1.Condition
+	for i := range updated.Status.Conditions {
+		if updated.Status.Conditions[i].Type == string(gatewayv1.GatewayConditionProgrammed) {
+			progCond = &updated.Status.Conditions[i]
+			break
+		}
+	}
+	assert.NotNil(t, progCond, "Programmed condition should be present")
+	assert.Equal(t, metav1.ConditionTrue, progCond.Status)
+	assert.Equal(t, "Programmed", progCond.Reason)
+
+	// Both listener conditions should be True
+	assert.Len(t, updated.Status.Listeners, 2)
+	for _, ls := range updated.Status.Listeners {
+		assert.Len(t, ls.Conditions, 1)
+		assert.Equal(t, metav1.ConditionTrue, ls.Conditions[0].Status)
+	}
+}
+
+func TestGatewayProgrammed_OneListenerNotProgrammed(t *testing.T) {
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "test-controller")
+	s := newGatewayTestScheme()
+
+	// GatewayClass without sni-proxy annotation, so SNI listener will get SessionNotEnabled
+	gc := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-class"},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: "test-controller"},
+	}
+	tlsMode := gatewayv1.TLSModePassthrough
+	k8sGw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-gw", Namespace: "test-ns"},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "my-class",
+			Listeners: []gatewayv1.Listener{
+				{Name: "http", Port: 80, Protocol: "HTTP"},
+				{
+					Name:     "tls",
+					Port:     443,
+					Protocol: "TLS",
+					TLS:      &gatewayv1.ListenerTLSConfig{Mode: &tlsMode},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(gc, k8sGw).
+		WithStatusSubresource(&gatewayv1.Gateway{}).
+		Build()
+
+	mockPool := newMockPool() // plain connected; SNI not in connectedKinds
+
+	reconciler := &GatewayReconciler{
+		Client: fakeClient,
+		Scheme: s,
+		pool:   mockPool,
+		gateways: map[string]*gateway{
+			"test-ns/test-gw": {
+				listeners: map[string]*Listener{
+					"http": {Hostname: "localhost", Port: 80, Protocol: "HTTP", SessionKind: sshmgr.SessionPlain},
+					// TLS Passthrough listener requires SNI session
+					"tls": {Hostname: "localhost", Port: 443, Protocol: "TLS", SessionKind: sshmgr.SessionSNIProxy},
+				},
+			},
+		},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "test-ns", Name: "test-gw"},
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, gatewayReconcilePeriod, result.RequeueAfter)
+
+	var updated gatewayv1.Gateway
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "test-ns", Name: "test-gw"}, &updated)
+	assert.NoError(t, err)
+
+	// Gateway-level Programmed should be False with reason ListenersNotProgrammed
+	var progCond *metav1.Condition
+	for i := range updated.Status.Conditions {
+		if updated.Status.Conditions[i].Type == string(gatewayv1.GatewayConditionProgrammed) {
+			progCond = &updated.Status.Conditions[i]
+			break
+		}
+	}
+	assert.NotNil(t, progCond, "Programmed condition should be present")
+	assert.Equal(t, metav1.ConditionFalse, progCond.Status)
+	assert.Equal(t, "ListenersNotProgrammed", progCond.Reason)
+
+	// Verify per-listener conditions
+	assert.Len(t, updated.Status.Listeners, 2)
+	listenerCondMap := make(map[string]metav1.Condition)
+	for _, ls := range updated.Status.Listeners {
+		if len(ls.Conditions) > 0 {
+			listenerCondMap[string(ls.Name)] = ls.Conditions[0]
+		}
+	}
+	assert.Equal(t, metav1.ConditionTrue, listenerCondMap["http"].Status)
+	assert.Equal(t, metav1.ConditionFalse, listenerCondMap["tls"].Status)
+	assert.Equal(t, ReasonSessionNotEnabled, listenerCondMap["tls"].Reason)
 }
