@@ -266,6 +266,35 @@ spec:
       port: 80
 ```
 
+## TLSRoute / SNI passthrough
+
+A single Deployment can expose plain TCP, PROXY-protocol-aware TCP, and TLS Passthrough listeners simultaneously. The full manifest lives at [`k8s/example-sni.yaml`](../k8s/example-sni.yaml).
+
+Key pieces:
+
+- `GatewayClass` carries both `ssh-gateway.io/proxy-protocol: "2"` and `ssh-gateway.io/sni-proxy: "true"`, opening three SSH sessions from one controller pod.
+- `Gateway` declares three listeners (`tcp-plain`, `tcp-pp`, `tls-passthrough`). The PP listener is opted in via the per-listener annotation `ssh-gateway.io/listener-proxy-protocol.tcp-pp: "true"`.
+- Two `TCPRoute`s pick the plain vs PP listener through `parentRefs[].sectionName`; a `TLSRoute` attaches to the TLS Passthrough listener and carries the SNI hostname.
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: TLSRoute
+metadata:
+  name: tls-example
+spec:
+  parentRefs:
+    - name: pico-sh-multi-example
+      sectionName: tls-passthrough
+  hostnames:
+    - example.tuns.sh
+  rules:
+    - backendRefs:
+        - name: example-tls-service
+          port: 8443
+```
+
+The backend pod must serve a valid certificate for `example.tuns.sh` — the controller does not terminate TLS in this mode. See [`CONFIGURATION.md`](../CONFIGURATION.md#backend-certificates-for-sni-passthrough) for certificate-acquisition options.
+
 ## Multi-Provider Setup
 
 You can run multiple instances of the controller for different SSH providers:

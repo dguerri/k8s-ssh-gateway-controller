@@ -89,8 +89,99 @@ The SSH Gateway API Controller can be configured using the following environment
     controllerName: pico.sh/ssh-gateway-api-controller
   ```
 - **Equivalent to**: `ssh pico.sh proxy-protocol=1`
-- **Note**: This is a session-level setting that applies to all Gateways and listeners using this GatewayClass. Only enable this if your backend services support PROXY protocol — backends that are not PROXY-protocol-aware will see malformed requests.
-- **Scope**: Per GatewayClass. If you need some backends with and some without PROXY protocol, use separate GatewayClasses (and separate controller deployments).
+- **Note**: This is a session-level setting on the SSH side: it opens a dedicated `proxy-protocol=N` sish session inside the controller's SSH session pool. Listeners that should use it are selected per-listener via the `ssh-gateway.io/listener-proxy-protocol.<listenerName>` Gateway annotation (see below). Backends behind PP-bound listeners must be PROXY-protocol-aware — otherwise they will see malformed requests.
+- **Scope**: Per GatewayClass. The PROXY-protocol version is class-wide because the underlying SSH session is class-wide; you can only enable one version per class.
+
+### `ssh-gateway.io/sni-proxy`
+- **Description**: Enables an `sni-proxy=true` sish session on the controller's SSH session pool. Required to program `protocol: TLS` listeners with `tls.mode: Passthrough` and to attach `TLSRoute` resources. The backend pod terminates TLS — the controller and SSH server never see the plaintext nor hold backend keys.
+- **Default**: `` (empty, SNI passthrough disabled)
+- **Values**: `"true"` (any other value disables and logs a warning)
+- **Example**:
+  ```yaml
+  apiVersion: gateway.networking.k8s.io/v1
+  kind: GatewayClass
+  metadata:
+    name: my-gateway-class
+    annotations:
+      ssh-gateway.io/sni-proxy: "true"
+  spec:
+    controllerName: pico.sh/ssh-gateway-api-controller
+  ```
+- **Equivalent to**: `ssh pico.sh sni-proxy=true`
+- **Note**: May be combined with `ssh-gateway.io/proxy-protocol`. When both are set, the controller opens three SSH sessions (plain, PP, SNI) from a single Deployment. A class with neither annotation behaves exactly as before — only the plain session opens.
+- **Scope**: Per GatewayClass.
+
+## Gateway Annotations
+
+### `ssh-gateway.io/listener-proxy-protocol.<listenerName>`
+- **Description**: Binds a single TCP listener on this Gateway to the PROXY-protocol SSH session. The `<listenerName>` suffix MUST match a `spec.listeners[].name` on the same Gateway. TCP listeners without this annotation use the plain session; HTTP and TLS listeners ignore it.
+- **Default**: absent (listener uses the plain session)
+- **Values**: `"true"` (case-insensitive); any other non-empty value logs a warning and is treated as absent
+- **Requires**: `ssh-gateway.io/proxy-protocol` on the GatewayClass. If the class does not enable PP, the listener becomes `Programmed=False / reason=SessionNotEnabled` and routes attaching to it surface `Accepted=False / reason=ListenerNotProgrammed`.
+- **Example** — one Gateway exposing both a plain TCP listener and a PP-bound TCP listener; TCPRoutes pick the flavour they want via `sectionName`:
+  ```yaml
+  apiVersion: gateway.networking.k8s.io/v1
+  kind: Gateway
+  metadata:
+    name: dual-tcp
+    annotations:
+      ssh-gateway.io/listener-proxy-protocol.tcp-pp: "true"
+  spec:
+    gatewayClassName: my-gateway-class
+    listeners:
+      - name: tcp-plain
+        protocol: TCP
+        port: 7000
+      - name: tcp-pp
+        protocol: TCP
+        port: 7001
+  ---
+  apiVersion: gateway.networking.k8s.io/v1alpha2
+  kind: TCPRoute
+  metadata:
+    name: plain-route
+  spec:
+    parentRefs:
+      - name: dual-tcp
+        sectionName: tcp-plain    # routed through the plain session
+    rules:
+      - backendRefs:
+          - name: plain-svc
+            port: 9000
+  ---
+  apiVersion: gateway.networking.k8s.io/v1alpha2
+  kind: TCPRoute
+  metadata:
+    name: pp-route
+  spec:
+    parentRefs:
+      - name: dual-tcp
+        sectionName: tcp-pp       # routed through the PP session
+    rules:
+      - backendRefs:
+          - name: pp-aware-svc
+            port: 9001
+  ```
+
+## Listener and Route Condition Reasons
+
+Listener-level `Programmed=False` reasons emitted by the controller:
+
+| Reason                        | Meaning                                                                                       |
+|-------------------------------|-----------------------------------------------------------------------------------------------|
+| `SessionNotEnabled`           | The listener requires a PP or SNI SSH session, but the GatewayClass does not enable it.       |
+| `UnsupportedTLSMode`          | A `TLS` listener uses `tls.mode: Terminate`; only `Passthrough` is supported.                 |
+| `UnsupportedListenerProtocol` | The listener uses a protocol the controller does not handle (for example `HTTPS`).            |
+
+When any listener is not programmed, routes attached to it surface the standard Gateway-API `Accepted=False / reason=ListenerNotProgrammed`. There are no bespoke route reasons for these cases — the misconfiguration always belongs to the listener.
+
+## Backend certificates for SNI passthrough
+
+In SNI passthrough mode the SSH server forwards raw TLS bytes; backend pods must serve a real certificate for the assigned hostname. The controller does not issue, mount, or manage any TLS material. Three common approaches:
+
+1. **cert-manager with HTTP-01.** Declare a parallel `HTTP` listener on :80 alongside the `TLS` Passthrough listener on :443 with the same hostname. cert-manager's HTTP-01 solver is reachable through sish; the resulting `Secret` is mounted into the backend pod. Works with `tuns.sh` subdomains. See the [cert-manager HTTP-01 docs](https://cert-manager.io/docs/configuration/acme/http01/).
+2. **cert-manager with DNS-01.** Only viable when you own the DNS zone and CNAME a custom name to your sish address. Not applicable to bare `tuns.sh` hostnames. See the [cert-manager DNS-01 docs](https://cert-manager.io/docs/configuration/acme/dns01/).
+3. **Statically provisioned certs.** Mount a `Secret` containing the cert and key into the backend pod. Simplest for prototypes; renewals are the operator's responsibility.
 
 ### Logging Configuration
 

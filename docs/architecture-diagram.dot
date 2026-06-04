@@ -17,12 +17,13 @@ digraph SSHGatewayController {
         style=filled;
         color=lightgrey;
 
-        GatewayClass [label="GatewayClass\n(CRD)", fillcolor="#E1F5FE"];
-        Gateway [label="Gateway\n(CRD)", fillcolor="#E1F5FE"];
+        GatewayClass [label="GatewayClass\n(CRD)\nproxy-protocol / sni-proxy", fillcolor="#E1F5FE"];
+        Gateway [label="Gateway\n(CRD)\nlistener-proxy-protocol", fillcolor="#E1F5FE"];
         HTTPRoute [label="HTTPRoute\n(CRD)", fillcolor="#E1F5FE"];
         TCPRoute [label="TCPRoute\n(CRD)", fillcolor="#E1F5FE"];
+        TLSRoute [label="TLSRoute\n(v1alpha2 CRD)", fillcolor="#E1F5FE"];
 
-        {rank=same; GatewayClass; Gateway; HTTPRoute; TCPRoute}
+        {rank=same; GatewayClass; Gateway; HTTPRoute; TCPRoute; TLSRoute}
     }
 
     // Controller Layer
@@ -70,15 +71,26 @@ digraph SSHGatewayController {
             TCPReconcile [label="Reconcile()\n• Watch TCPRoute events\n• Periodic: 10s\n• Create/Update → SetRoute()\n• Delete → RemoveRoute()", fillcolor="#90CAF9"];
             TCPExtract [label="extractTCPRouteDetails()\n• Parse route spec\n• Extract backend", fillcolor="#90CAF9"];
         }
+
+        // TLSRoute Controller
+        subgraph cluster_tls_controller {
+            label="TLSRoute Controller (v1alpha2)";
+            style="rounded,filled";
+            color="#BBDEFB";
+
+            TLSReconcile [label="Reconcile()\n• Watch TLSRoute events\n• Periodic: 10s\n• Create/Update → SetRoute()\n• Delete → RemoveRoute()", fillcolor="#90CAF9"];
+            TLSExtract [label="extractTLSRouteDetails()\n• Parse SNI hostnames\n• Extract backend", fillcolor="#90CAF9"];
+        }
     }
 
     // SSH Manager Layer
     subgraph cluster_ssh {
-        label="SSH Tunnel Manager";
+        label="SSH Session Pool (1..3 Tunnel Managers)";
         style=filled;
         color="#FFE0B2";
 
-        SSHConnect [label="Connect()\n• Auth via key/password\n• Start monitor", fillcolor="#FFCC80"];
+        SSHPool [label="SSHSessionPool\n• ConfigureSessions(pp, sni)\n• Route by SessionKind\n• plain / pp / sni", fillcolor="#FFB74D"];
+        SSHConnect [label="Connect()\n• Auth via key/password\n• Start monitor\n• Session flags baked in", fillcolor="#FFCC80"];
         SSHMonitor [label="monitorConnection()\n• Send keepalives\n• Detect disconnects\n• Close on failure", fillcolor="#FFCC80"];
         SSHStartForwarding [label="StartForwarding()\n• Send tcpip-forward\n• Validate hostname\n• Store addresses", fillcolor="#FFCC80"];
         SSHStopForwarding [label="StopForwarding()\n• Send cancel-tcpip\n• Clean state", fillcolor="#FFCC80"];
@@ -112,6 +124,7 @@ digraph SSHGatewayController {
     Gateway -> GWReconcile [label="watch", style=dashed, color=blue];
     HTTPRoute -> HTTPReconcile [label="watch", style=dashed, color=blue];
     TCPRoute -> TCPReconcile [label="watch", style=dashed, color=blue];
+    TLSRoute -> TLSReconcile [label="watch", style=dashed, color=blue];
     GatewayClass -> K8sAPI [label="validate", style=dotted];
 
     // ========================================
@@ -164,6 +177,10 @@ digraph SSHGatewayController {
     TCPReconcile -> GWSetRoute [label="2. create/update\nsetup forwarding", color="#4CAF50"];
     TCPReconcile -> GWRemoveRoute [label="3. delete\nremove forwarding", color="#F44336"];
 
+    TLSReconcile -> TLSExtract [label="1. parse", color="#9C27B0"];
+    TLSReconcile -> GWSetRoute [label="2. create/update\nsetup forwarding", color="#4CAF50"];
+    TLSReconcile -> GWRemoveRoute [label="3. delete\nremove forwarding", color="#F44336"];
+
     // ========================================
     // RELATIONSHIPS - SSH Manager Internal
     // ========================================
@@ -196,8 +213,15 @@ digraph SSHGatewayController {
     Internet -> SSHServer [label="requests", color="#4CAF50", penwidth=2];
     SSHServer -> SSHHandleChannels [label="new\nchannels", color="#4CAF50", penwidth=2];
 
+    // Pool routes Gateway calls to per-kind managers
+    SSHPool -> SSHConnect [label="open per\nkind", color="#FF9800", style=dotted];
+    SSHPool -> SSHStartForwarding [label="dispatch\nby kind", color="#FF9800", style=dotted];
+    SSHPool -> SSHStopForwarding [label="dispatch\nby kind", color="#FF9800", style=dotted];
+    SSHPool -> SSHGetAddresses [label="dispatch\nby kind", color="#9C27B0", style=dotted];
+    SSHPool -> SSHIsConnected [label="dispatch\nby kind", color="#9C27B0", style=dotted];
+
     // Periodic reconciliation annotations
-    {rank=same; GWReconcile; HTTPReconcile; TCPReconcile}
+    {rank=same; GWReconcile; HTTPReconcile; TCPReconcile; TLSReconcile}
 
     // Legend
     subgraph cluster_legend {

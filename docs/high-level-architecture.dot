@@ -21,10 +21,11 @@ digraph HighLevelArchitecture {
 
         resources [label=<
             <table border="0" cellborder="1" cellspacing="0" cellpadding="8">
-                <tr><td bgcolor="#E1F5FE"><b>GatewayClass</b></td></tr>
-                <tr><td bgcolor="#E1F5FE"><b>Gateway</b><br/>• Listeners<br/>• SSH config</td></tr>
-                <tr><td bgcolor="#E1F5FE"><b>HTTPRoute</b><br/>• Hostname rules<br/>• Backends</td></tr>
-                <tr><td bgcolor="#E1F5FE"><b>TCPRoute</b><br/>• Port rules<br/>• Backends</td></tr>
+                <tr><td bgcolor="#E1F5FE"><b>GatewayClass</b><br/>• proxy-protocol / sni-proxy annotations</td></tr>
+                <tr><td bgcolor="#E1F5FE"><b>Gateway</b><br/>• Listeners (HTTP/TCP/TLS)<br/>• listener-proxy-protocol annotation</td></tr>
+                <tr><td bgcolor="#E1F5FE"><b>HTTPRoute</b><br/>• Hostname rules → plain session</td></tr>
+                <tr><td bgcolor="#E1F5FE"><b>TCPRoute</b><br/>• Port rules → plain or pp session</td></tr>
+                <tr><td bgcolor="#E1F5FE"><b>TLSRoute (v1alpha2)</b><br/>• SNI hostnames → sni session</td></tr>
             </table>
         >, shape=plaintext];
     }
@@ -36,14 +37,15 @@ digraph HighLevelArchitecture {
 
         route_controllers [label=<
             <table border="0" cellborder="1" cellspacing="0" cellpadding="8">
-                <tr><td colspan="2" bgcolor="#90CAF9"><b>Route Controllers</b></td></tr>
-                <tr><td bgcolor="#BBDEFB">HTTPRoute<br/>Reconciler</td><td bgcolor="#BBDEFB">TCPRoute<br/>Reconciler</td></tr>
-                <tr><td colspan="2"><font point-size="10"><b>Responsibilities:</b><br/>
+                <tr><td colspan="3" bgcolor="#90CAF9"><b>Route Controllers</b></td></tr>
+                <tr><td bgcolor="#BBDEFB">HTTPRoute<br/>Reconciler</td><td bgcolor="#BBDEFB">TCPRoute<br/>Reconciler</td><td bgcolor="#BBDEFB">TLSRoute<br/>Reconciler<br/>(v1alpha2)</td></tr>
+                <tr><td colspan="3"><font point-size="10"><b>Responsibilities:</b><br/>
                 • Watch route resources<br/>
                 • Periodic reconciliation (10s)<br/>
                 • Validate forwardings exist<br/>
                 • Call SetRoute/RemoveRoute<br/>
-                • Fail fast on errors</font></td></tr>
+                • Fail fast on errors<br/>
+                • Listener carries the SessionKind; routes don't compute it</font></td></tr>
             </table>
         >, shape=plaintext];
 
@@ -71,13 +73,27 @@ digraph HighLevelArchitecture {
         style=filled;
         color="#FFE0B2";
 
+        ssh_pool [label=<
+            <table border="0" cellborder="1" cellspacing="0" cellpadding="8">
+                <tr><td bgcolor="#FFB74D"><b>SSH Session Pool</b></td></tr>
+                <tr><td><font point-size="10"><b>Responsibilities:</b><br/>
+                • Hold up to 3 SSH Tunnel Managers<br/>
+                • Open/close PP and SNI sessions per<br/>&nbsp;&nbsp;GatewayClass annotations<br/>
+                • Route StartForwarding/StopForwarding/<br/>&nbsp;&nbsp;GetAssignedAddresses/IsConnected<br/>&nbsp;&nbsp;by SessionKind<br/><br/>
+                <b>SessionKind:</b><br/>
+                • SessionPlain (always open)<br/>
+                • SessionProxyProto (proxy-protocol=N)<br/>
+                • SessionSNIProxy (sni-proxy=true)</font></td></tr>
+            </table>
+        >, shape=plaintext];
+
         ssh_manager [label=<
             <table border="0" cellborder="1" cellspacing="0" cellpadding="8">
-                <tr><td bgcolor="#FFCC80"><b>SSH Tunnel Manager</b></td></tr>
+                <tr><td bgcolor="#FFCC80"><b>SSH Tunnel Manager (per session)</b></td></tr>
                 <tr><td><font point-size="10"><b>Responsibilities:</b><br/>
-                • Establish/close SSH connection<br/>
+                • Establish/close one SSH connection<br/>
                 • Send keepalives, detect failures<br/>
-                • Start/stop forwardings<br/>
+                • Start/stop forwardings on its session<br/>
                 • Validate hostname matches<br/>
                 • Maintain clean state<br/>
                 • Proxy traffic to backends<br/>
@@ -91,9 +107,12 @@ digraph HighLevelArchitecture {
                 • monitorConnection (keepalive only)<br/><br/>
                 <b>State (always consistent):</b><br/>
                 • forwardings map<br/>
-                • assignedAddrs map</font></td></tr>
+                • assignedAddrs map<br/>
+                • session label baked into every log line</font></td></tr>
             </table>
         >, shape=plaintext];
+
+        ssh_pool -> ssh_manager [label="  1..3  ", style=dotted];
     }
 
     subgraph cluster_external {
@@ -134,16 +153,16 @@ digraph HighLevelArchitecture {
     // FLOW: Gateway Controller → SSH Manager
     // ========================================
 
-    gateway_controller -> ssh_manager [label=<
+    gateway_controller -> ssh_pool [label=<
         <table border="0" cellborder="0" cellspacing="0">
-            <tr><td><b>Connection Management:</b></td></tr>
-            <tr><td>• IsConnected()</td></tr>
-            <tr><td>• Connect()</td></tr>
-            <tr><td><br/><b>Forwarding Operations:</b></td></tr>
-            <tr><td>• StartForwarding()</td></tr>
-            <tr><td>• StopForwarding()</td></tr>
+            <tr><td><b>Session Management:</b></td></tr>
+            <tr><td>• ConfigureSessions(pp, sni)</td></tr>
+            <tr><td>• IsConnected(kind)</td></tr>
+            <tr><td><br/><b>Forwarding Operations (per kind):</b></td></tr>
+            <tr><td>• StartForwarding(kind, ...)</td></tr>
+            <tr><td>• StopForwarding(kind, ...)</td></tr>
             <tr><td><br/><b>Validation:</b></td></tr>
-            <tr><td>• GetAssignedAddresses()</td></tr>
+            <tr><td>• GetAssignedAddresses(kind, ...)</td></tr>
         </table>
     >, color="#FF9800", penwidth=2];
 
@@ -153,7 +172,8 @@ digraph HighLevelArchitecture {
 
     ssh_manager -> ssh_server [label=<
         <table border="0" cellborder="0" cellspacing="0">
-            <tr><td><b>SSH Protocol:</b></td></tr>
+            <tr><td><b>SSH Protocol (per session):</b></td></tr>
+            <tr><td>• 1 session per kind (plain/pp/sni)</td></tr>
             <tr><td>• tcpip-forward request</td></tr>
             <tr><td>• cancel-tcpip-forward</td></tr>
             <tr><td>• forwarded-tcpip channels</td></tr>

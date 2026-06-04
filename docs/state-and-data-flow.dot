@@ -47,8 +47,27 @@ digraph StateAndDataFlow {
         listeners_map -> route_state [label="contains", style=dotted];
     }
 
+    subgraph cluster_session_mapping {
+        label="Route → Session Kind Mapping";
+        style=filled;
+        color="#FFF9C4";
+
+        mapping [label=<
+            <table border="0" cellborder="1" cellspacing="0" cellpadding="6">
+                <tr><td bgcolor="#FFF59D" colspan="3"><b>Listener.sessionKind (computed at registration)</b></td></tr>
+                <tr><td><b>Listener</b></td><td><b>Gateway annotation</b></td><td><b>SessionKind</b></td></tr>
+                <tr><td>HTTP</td><td>n/a</td><td>SessionPlain</td></tr>
+                <tr><td>TCP</td><td>(absent)</td><td>SessionPlain</td></tr>
+                <tr><td>TCP</td><td>listener-proxy-protocol.&lt;name&gt;="true"</td><td>SessionProxyProto</td></tr>
+                <tr><td>TLS (Passthrough)</td><td>n/a</td><td>SessionSNIProxy</td></tr>
+                <tr><td>TLS (Terminate) / HTTPS</td><td>n/a</td><td>rejected (UnsupportedTLSMode /<br/>UnsupportedListenerProtocol)</td></tr>
+                <tr><td colspan="3"><font point-size="9">Routes never pass a SessionKind — the listener carries it.<br/>Pool calls (StartForwarding/StopForwarding/...) are dispatched by listener.sessionKind.</font></td></tr>
+            </table>
+        >, shape=plaintext];
+    }
+
     subgraph cluster_ssh_state {
-        label="SSH Manager State";
+        label="SSH Session Pool State (1..3 managers)";
         style=filled;
         color="#FFE0B2";
 
@@ -92,9 +111,9 @@ digraph StateAndDataFlow {
 
         s1_1 [label="1. HTTPRoute created\nin Kubernetes", fillcolor="#BBDEFB"];
         s1_2 [label="2. HTTPRoute.Reconcile()\ntriggers", fillcolor="#BBDEFB"];
-        s1_3 [label="3. GW.SetRoute() called\nwith route details", fillcolor="#90CAF9"];
-        s1_4 [label="4. Check isForwardingValid()\nreturns false (new route)", fillcolor="#90CAF9"];
-        s1_5 [label="5. SSH.StartForwarding()\ncalled", fillcolor="#FFB74D"];
+        s1_3 [label="3. GW.SetRoute() called\nlooks up listener.sessionKind", fillcolor="#90CAF9"];
+        s1_4 [label="4. Check isForwardingValid()\non SSHSessionPool(kind)\nreturns false (new route)", fillcolor="#90CAF9"];
+        s1_5 [label="5. Pool.StartForwarding(kind, ...)\ndispatched to per-kind manager", fillcolor="#FFB74D"];
         s1_6 [label="6. Add to forwardings map\nwait for assignedAddrs", fillcolor="#FFB74D"];
         s1_7 [label="7. Server responds\nwith assigned URIs", fillcolor="#FFB74D"];
         s1_8 [label="8. Validate hostname match\nupdate assignedAddrs", fillcolor="#FFB74D"];
@@ -162,6 +181,7 @@ digraph StateAndDataFlow {
             <tr><td><b>Invariant 4</b></td><td>Hostname validation happens in SSH Manager<br/>(fail fast if server assigns wrong hostname)</td></tr>
             <tr><td><b>Invariant 5</b></td><td>GetAssignedAddresses uses RLock for concurrent reads<br/>(called frequently by periodic reconciliation)</td></tr>
             <tr><td><b>Invariant 6</b></td><td>Lock hierarchy: clientMu acquired before addrNotifMu<br/>(prevents deadlocks)</td></tr>
+            <tr><td><b>Invariant 7</b></td><td>listener.sessionKind is fixed at registration; routes never compute it.<br/>Changing the Gateway annotation triggers stop-on-old / start-on-new.</td></tr>
             <tr><td><b>Recovery</b></td><td>isForwardingValid() detects stale state → clear listener.route → retry<br/>Kubernetes exponential backoff handles retry timing</td></tr>
         </table>
     >, shape=plaintext];
