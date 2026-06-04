@@ -22,6 +22,7 @@ digraph SimplifiedArchitecture {
         GatewayController [label="Gateway Controller\n\n• Manage SSH connection\n• Provide SetRoute/RemoveRoute\n• Update Gateway status", fillcolor="#A5D6A7", width=3];
         HTTPController [label="HTTPRoute Controller\n\n• Watch HTTPRoute\n• Call SetRoute/RemoveRoute", fillcolor="#90CAF9", width=3];
         TCPController [label="TCPRoute Controller\n\n• Watch TCPRoute\n• Call SetRoute/RemoveRoute", fillcolor="#90CAF9", width=3];
+        TLSController [label="TLSRoute Controller\n\n• Watch TLSRoute (v1alpha2)\n• Call SetRoute/RemoveRoute", fillcolor="#90CAF9", width=3];
     }
 
     subgraph cluster_ssh {
@@ -29,7 +30,14 @@ digraph SimplifiedArchitecture {
         style=filled;
         color="#FFE0B2";
 
-        SSHManager [label="SSH Tunnel Manager\n\n• Connect/Disconnect\n• Start/Stop Forwardings\n• Monitor keepalive\n• Proxy traffic", fillcolor="#FFCC80", width=3];
+        SSHPool [label="SSH Session Pool\n\n• Up to 3 sessions per pod\n• plain / pp / sni\n• Routes calls by SessionKind", fillcolor="#FFB74D", width=3];
+        SSHPlain [label="Plain Manager\n(session=plain)", fillcolor="#FFCC80"];
+        SSHPP [label="PP Manager\n(session=pp:vN)\n[if class flag set]", fillcolor="#FFCC80"];
+        SSHSNI [label="SNI Manager\n(session=sni)\n[if class flag set]", fillcolor="#FFCC80"];
+
+        SSHPool -> SSHPlain [style=dotted];
+        SSHPool -> SSHPP [style=dotted];
+        SSHPool -> SSHSNI [style=dotted];
     }
 
     subgraph cluster_external {
@@ -38,7 +46,7 @@ digraph SimplifiedArchitecture {
         color="#F3E5F5";
 
         K8sAPI [label="Kubernetes API", fillcolor="#E1BEE7", shape=ellipse];
-        SSHServer [label="SSH Server\n(pico.sh/tuns.sh)", fillcolor="#E1BEE7"];
+        SSHServer [label="SSH Server\n(pico.sh/tuns.sh)\nplain / pp / sni sessions", fillcolor="#E1BEE7"];
         Backend [label="Backend Services", fillcolor="#E1BEE7"];
     }
 
@@ -50,20 +58,24 @@ digraph SimplifiedArchitecture {
     K8sAPI -> GatewayController [label="  Gateway\n  events  ", color="#2196F3", style=dashed];
     K8sAPI -> HTTPController [label="  HTTPRoute\n  events  ", color="#2196F3", style=dashed];
     K8sAPI -> TCPController [label="  TCPRoute\n  events  ", color="#2196F3", style=dashed];
+    K8sAPI -> TLSController [label="  TLSRoute\n  events  ", color="#2196F3", style=dashed];
 
     // Route controllers to Gateway controller
     HTTPController -> GatewayController [label="  SetRoute()\n  RemoveRoute()  ", color="#4CAF50"];
     TCPController -> GatewayController [label="  SetRoute()\n  RemoveRoute()  ", color="#4CAF50"];
+    TLSController -> GatewayController [label="  SetRoute()\n  RemoveRoute()  ", color="#4CAF50"];
 
-    // Gateway controller to SSH Manager
-    GatewayController -> SSHManager [label="  Connect()\n  IsConnected()\n  StartForwarding()\n  StopForwarding()\n  GetAssignedAddresses()  ", color="#FF9800"];
+    // Gateway controller to SSH Session Pool
+    GatewayController -> SSHPool [label="  ConfigureSessions()\n  IsConnected(kind)\n  StartForwarding(kind, ...)\n  StopForwarding(kind, ...)\n  GetAssignedAddresses(kind, ...)  ", color="#FF9800"];
 
     // Gateway controller to K8s API
     GatewayController -> K8sAPI [label="  Update\n  Gateway.status  ", color="#2196F3", style=dotted];
 
-    // SSH Manager to external
-    SSHManager -> SSHServer [label="  SSH Protocol\n  (forwardings)  ", color="#F44336", dir=both];
-    SSHManager -> Backend [label="  Proxy\n  traffic  ", color="#4CAF50"];
+    // Each pooled manager opens its own SSH session
+    SSHPlain -> SSHServer [label="  plain session  ", color="#F44336", dir=both];
+    SSHPP -> SSHServer [label="  proxy-protocol=N  ", color="#F44336", dir=both];
+    SSHSNI -> SSHServer [label="  sni-proxy=true  ", color="#F44336", dir=both];
+    SSHPool -> Backend [label="  Proxy\n  traffic  ", color="#4CAF50"];
 
     // ========================================
     // KEY FLOWS AS SUBGRAPHS

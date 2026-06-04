@@ -114,6 +114,12 @@ env:
 - `GatewayPorts yes` in sshd_config (for binding to all interfaces)
 - User must have permission to bind to ports
 
+### SNI passthrough (sish / `tuns.sh`)
+
+sish-based providers (including `tuns.sh`) can run additional session-level flavours alongside the plain reverse-forwarding session: `proxy-protocol=N` and `sni-proxy=true`. The controller exposes these to operators via `GatewayClass` and per-listener `Gateway` annotations, and opens up to three SSH sessions from a single Deployment — one per flavour — picking which session a listener belongs to from its protocol and annotations.
+
+This lets one deployment host plain HTTP/TCP, PROXY-protocol TCP, and TLS-passthrough listeners simultaneously. TLS-passthrough is driven by `TLSRoute` resources; the backend pod terminates TLS itself (the controller never holds backend certs). See [`docs/superpowers/specs/2026-06-03-sni-proxying-design.md`](docs/superpowers/specs/2026-06-03-sni-proxying-design.md) for the full design and [`k8s/example-sni.yaml`](k8s/example-sni.yaml) for a ready-to-apply manifest combining all three listener flavours under one Gateway.
+
 ## Installation
 
 ### 1. Build the controller container
@@ -254,6 +260,7 @@ The controller supports the following Gateway API resources:
 - **Gateway**: Defines listeners (ports and protocols) for incoming traffic
 - **HTTPRoute**: Routes HTTP traffic to backend services
 - **TCPRoute**: Routes TCP traffic to backend services
+- **TLSRoute** (`gateway.networking.k8s.io/v1alpha2`): Routes TLS traffic to backend services using SNI passthrough (the backend terminates TLS)
 
 ## Troubleshooting
 

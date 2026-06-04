@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **TLSRoute support** (`gateway.networking.k8s.io/v1alpha2`) for `protocol: TLS` listeners with `tls.mode: Passthrough`. The backend pod terminates TLS; the controller never holds backend keys.
+- **SNI-proxy SSH session.** New `ssh-gateway.io/sni-proxy: "true"` annotation on `GatewayClass` opens a sish `sni-proxy=true` session.
+- **Multi-session SSH pool.** A single controller Deployment now manages up to three concurrent SSH sessions (plain, `proxy-protocol=N`, `sni-proxy=true`) and dispatches each listener to the appropriate session based on its protocol, `tls.mode`, and annotations.
+- **Per-listener PROXY-protocol opt-in.** New `ssh-gateway.io/listener-proxy-protocol.<listenerName>: "true"` annotation on `Gateway` binds an individual TCP listener to the PP session, letting one Gateway expose both plain and PP-bound TCP listeners. TCPRoutes pick the flavour via `parentRefs[].sectionName`.
+- **Per-listener `Programmed` conditions** on `GatewayStatus.Listeners` with new reasons `SessionNotEnabled`, `UnsupportedTLSMode`, and `UnsupportedListenerProtocol`. Routes attached to non-programmed listeners surface the standard `Accepted=False / reason=ListenerNotProgrammed`.
+- New manifest `k8s/example-sni.yaml` — a multi-session example combining plain TCP, PP-bound TCP, and TLS Passthrough listeners under a single Gateway.
+
+### Changed
+- `GatewayReconciler` now talks to an `SSHSessionPool` instead of a single `SSHTunnelManagerInterface`. Existing single-session deployments behave identically: when no new annotations are set, only the plain session opens.
+
+### Removed
+- `SetProxyProtocol` and `GetProxyProtocol` are no longer part of `SSHTunnelManagerInterface`. PROXY-protocol configuration is now a property of an individual session inside the pool; this was always an internal concern and the methods had no external consumers.
+
 ## [2.0.0] - 2025-09-03
 
 ### Changed

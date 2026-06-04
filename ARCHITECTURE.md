@@ -27,17 +27,19 @@ The SSH Gateway API Controller is a Kubernetes controller that implements the Ga
 │  │         └─────────────────┴────────────────┘         │   │
 │  │                           │                          │   │
 │  │                   ┌───────▼────────┐                 │   │
-│  │                   │ SSH Tunnel     │                 │   │
-│  │                   │ Manager        │                 │   │
+│  │                   │ SSH Session    │                 │   │
+│  │                   │ Pool           │                 │   │
+│  │                   │ (1-3 managers) │                 │   │
 │  │                   └───────┬────────┘                 │   │
 │  └───────────────────────────┼──────────────────────────┘   │
-│                              │ SSH Connection               │
+│                              │ up to 3 SSH sessions         │
 └──────────────────────────────┼──────────────────────────────┘
                                │
                                ▼
                   ┌───────────────────────┐
                   │   SSH Server          │
                   │  (pico.sh, tuns.sh)   │
+                  │   plain / pp / sni    │
                   └───────────────────────┘
                               │
                               ▼
@@ -320,9 +322,49 @@ When `SetRoute()` fails with `ErrGatewayNotReady` or `ErrGatewayNotFound`:
 
 ---
 
-### 5. SSH Tunnel Manager (`ssh/ssh_tunnel_manager.go`)
+### 5. SSH Session Pool (`ssh/ssh_session_pool.go`)
 
-**Responsibility**: Manages SSH connections and port forwardings
+**Responsibility**: Owns up to three `SSHTunnelManager` instances inside a single controller Deployment, one per "session kind", and routes pool calls to the appropriate manager.
+
+sish's session-level flags (`proxy-protocol=N`, `sni-proxy=true`) apply to *every* `-R` forwarding on the SSH session — they are not per-forward. To support PROXY-protocol-aware TCP and SNI-passthrough TLS without forcing operators to run a separate Deployment per flavour, the controller opens a small set of concurrent SSH sessions, picks one per listener at registration time, and presents them through a single pool interface.
+
+```go
+type SessionKind int
+const (
+    SessionPlain      SessionKind = iota // always open
+    SessionProxyProto                    // open if ssh-gateway.io/proxy-protocol set on the GatewayClass
+    SessionSNIProxy                      // open if ssh-gateway.io/sni-proxy=true on the GatewayClass
+)
+
+type SSHSessionPool interface {
+    ConfigureSessions(ppVersion int, sniEnabled bool) error
+    StartForwarding(kind SessionKind, cfg sshmgr.ForwardingConfig) error
+    StopForwarding(kind SessionKind, cfg *sshmgr.ForwardingConfig) error
+    GetAssignedAddresses(kind SessionKind, host string, port int) []string
+    IsConnected(kind SessionKind) bool
+    Stop()
+}
+```
+
+The plain manager is constructed eagerly at controller start. PP and SNI managers are created lazily by `ConfigureSessions` based on `GatewayClass` annotations and torn down when the class disables their flag. Every log line produced inside the pool and its managers carries a `session=<label>` field (`plain`, `pp:v1`, `pp:v2`, or `sni`).
+
+#### Per-route session selection
+
+Route reconcilers do not compute or pass a `SessionKind`. The **listener** carries it, decided once at listener-registration time:
+
+| Listener configuration                                                              | Bound session       | Accepted routes |
+|-------------------------------------------------------------------------------------|---------------------|-----------------|
+| `protocol: HTTP`                                                                    | `SessionPlain`      | `HTTPRoute`     |
+| `protocol: TCP`, no `ssh-gateway.io/listener-proxy-protocol.<name>` on the Gateway  | `SessionPlain`      | `TCPRoute`      |
+| `protocol: TCP`, `ssh-gateway.io/listener-proxy-protocol.<name>: "true"` on Gateway | `SessionProxyProto` | `TCPRoute`      |
+| `protocol: TLS`, `tls.mode: Passthrough`                                            | `SessionSNIProxy`   | `TLSRoute`      |
+| `protocol: TLS`, `tls.mode: Terminate` / `HTTPS`                                    | rejected            | none            |
+
+A listener whose required session is not enabled at the class level is marked `Programmed=False / reason=SessionNotEnabled` and routes attaching to it surface `Accepted=False / reason=ListenerNotProgrammed`. The controller never silently downgrades a listener to a different session.
+
+### 6. SSH Tunnel Manager (`ssh/ssh_tunnel_manager.go`)
+
+**Responsibility**: Manages a single SSH connection and its port forwardings. The pool owns one manager per session kind; each manager only sees its own forwardings and session flags.
 
 #### Internal State
 

@@ -8,6 +8,16 @@ The SSH Gateway API controller works with any SSH server that supports reverse p
 
 ## Supported Providers
 
+### Provider capability matrix
+
+| Provider           | Reverse forwarding | PROXY protocol (`proxy-protocol=N`) | SNI passthrough (`sni-proxy=true`) |
+|--------------------|--------------------|--------------------------------------|-------------------------------------|
+| Pico.sh / `tuns.sh`| Yes                | Yes                                  | Yes                                 |
+| Serveo             | Yes                | Not documented                       | Not documented                      |
+| Plain OpenSSH      | Yes                | No (no session-level PP injection)   | No (no SNI dispatch)                |
+
+The PROXY-protocol and SNI-passthrough columns reflect the session-level features the controller wires up through `ssh-gateway.io/proxy-protocol` and `ssh-gateway.io/sni-proxy` on the `GatewayClass`. Plain OpenSSH does not implement sish's session-level flags; if you need either capability against an arbitrary SSH server, you must run an sish-compatible server-side implementation.
+
 ### 1. Pico.sh
 
 [Pico.sh](https://pico.sh/tuns) is a premium SSH tunneling service that provides:
@@ -16,6 +26,7 @@ The SSH Gateway API controller works with any SSH server that supports reverse p
 - Multi-region support
 - Per-site analytics
 - Alerting for tunnel connect/disconnects
+- SNI passthrough and PROXY-protocol session flavours (see [`CONFIGURATION.md`](../CONFIGURATION.md#ssh-gatewayiosni-proxy) and [`k8s/example-sni.yaml`](../k8s/example-sni.yaml))
 
 #### Configuration
 

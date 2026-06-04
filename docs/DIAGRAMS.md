@@ -9,8 +9,8 @@ This directory contains comprehensive Graphviz diagrams documenting the SSH Gate
 **Purpose**: Clean, easy-to-follow diagram showing main components and primary flows.
 
 **Key Elements**:
-- Main components (Gateway Controller, Route Controllers, SSH Manager)
-- Primary data flows with clear labels
+- Main components (Gateway Controller, Route Controllers including TLSRoute, SSH Session Pool with up to three per-kind managers)
+- Primary data flows with clear labels, including the fan-out from the pool to plain / pp / sni sessions on the SSH server
 - Three key scenarios visualized:
   1. Route Creation (5 steps)
   2. SSH Reconnection (5 steps)
@@ -30,9 +30,9 @@ dot -Tsvg docs/simplified-architecture.dot -o docs/simplified-architecture.svg
 **Purpose**: Shows the overall system architecture with component responsibilities and data flows.
 
 **Key Elements**:
-- Kubernetes resources (GatewayClass, Gateway, HTTPRoute, TCPRoute)
-- Controller layer (Route Controllers, Gateway Controller)
-- SSH layer (SSH Tunnel Manager)
+- Kubernetes resources (GatewayClass, Gateway, HTTPRoute, TCPRoute, TLSRoute)
+- Controller layer (Route Controllers including TLSRoute, Gateway Controller)
+- SSH layer (SSH Session Pool wrapping 1..3 SSH Tunnel Managers)
 - External systems (SSH Server, Backends, Internet)
 - Architecture principles and design decisions
 
@@ -74,12 +74,13 @@ dot -Tsvg docs/architecture-diagram.dot -o docs/architecture-diagram.svg
 **Purpose**: Documents state management, data structures, and critical scenarios.
 
 **Key Elements**:
-- State stores in Gateway Controller and SSH Manager
+- State stores in Gateway Controller and SSH Session Pool (one per session kind)
+- Route → SessionKind mapping (HTTP→plain, TCP→plain/pp, TLS Passthrough→sni)
 - Three critical scenarios:
   1. Normal route setup
   2. SSH reconnect with wrong hostname
   3. Periodic validation (happy path)
-- Critical invariants
+- Critical invariants (including listener.sessionKind stability)
 - Validation logic
 - State machine transitions
 
