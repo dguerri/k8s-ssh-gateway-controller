@@ -20,28 +20,23 @@ const annotationProxyProtocol = "ssh-gateway.io/proxy-protocol"
 const annotationSNIProxy = "ssh-gateway.io/sni-proxy"
 const annotationListenerProxyProtocolPrefix = "ssh-gateway.io/listener-proxy-protocol."
 
-// SessionKind identifies which SSH session variant is in use.
-type SessionKind int
+// SessionKind is a type alias for sshmgr.SessionKind so there is a single enum.
+// Controllers reference SessionPlain / SessionProxyProto / SessionSNIProxy directly.
+type SessionKind = sshmgr.SessionKind
 
 const (
-	SessionPlain      SessionKind = iota // plain SSH, no wrapping
-	SessionProxyProto                    // PROXY protocol (v1 or v2) prefix
-	SessionSNIProxy                      // TLS SNI proxy front-end
+	SessionPlain      = sshmgr.SessionPlain
+	SessionProxyProto = sshmgr.SessionProxyProto
+	SessionSNIProxy   = sshmgr.SessionSNIProxy
 )
 
-// String returns a short human-readable label for the session kind.
-func (k SessionKind) String() string {
-	switch k {
-	case SessionPlain:
-		return "plain"
-	case SessionProxyProto:
-		return "pp"
-	case SessionSNIProxy:
-		return "sni"
-	default:
-		return "unknown"
-	}
-}
+// Listener.Reason values for Rejected listeners. Surfaced as the
+// Programmed=False condition Reason on the Gateway listener status (Task 7).
+const (
+	ReasonUnsupportedTLSMode          = "UnsupportedTLSMode"
+	ReasonUnsupportedListenerProtocol = "UnsupportedListenerProtocol"
+	ReasonSessionNotEnabled           = "SessionNotEnabled"
+)
 
 // ClassSessionConfig holds the typed session configuration derived from
 // GatewayClass annotations.
@@ -177,19 +172,47 @@ func getGwKey(gwNamespace, gwName string) string {
 	return fmt.Sprintf("%s/%s", gwNamespace, gwName)
 }
 
-func createListener(k8sListener gatewayv1.Listener) *Listener {
+func createListener(k8sListener gatewayv1.Listener, gwAnnotations map[string]string) *Listener {
 	remoteHostname := "localhost"
 	if k8sListener.Hostname != nil {
 		remoteHostname = string(*k8sListener.Hostname)
 	}
-	return &Listener{
+	l := &Listener{
 		Hostname: remoteHostname,
 		Protocol: string(k8sListener.Protocol),
 		Port:     int(k8sListener.Port),
 	}
+	deriveListenerSession(l, k8sListener, gwAnnotations)
+	return l
 }
 
-func createSSHManager(ctx context.Context) (*sshmgr.SSHTunnelManager, error) {
+// deriveListenerSession sets l.SessionKind (or l.Rejected + l.Reason) based on
+// the listener protocol, its TLS config, and the Gateway-level annotations.
+func deriveListenerSession(l *Listener, k8sListener gatewayv1.Listener, gwAnnotations map[string]string) {
+	switch strings.ToUpper(l.Protocol) {
+	case "HTTP":
+		l.SessionKind = sshmgr.SessionPlain
+	case "TCP":
+		if parseListenerProxyProtocol(gwAnnotations, string(k8sListener.Name)) {
+			l.SessionKind = sshmgr.SessionProxyProto
+		} else {
+			l.SessionKind = sshmgr.SessionPlain
+		}
+	case "TLS":
+		if k8sListener.TLS != nil && k8sListener.TLS.Mode != nil && *k8sListener.TLS.Mode == gatewayv1.TLSModePassthrough {
+			l.SessionKind = sshmgr.SessionSNIProxy
+		} else {
+			l.Rejected = true
+			l.Reason = ReasonUnsupportedTLSMode
+		}
+	default:
+		// HTTPS, UDP, anything else.
+		l.Rejected = true
+		l.Reason = ReasonUnsupportedListenerProtocol
+	}
+}
+
+func createSSHSessionPool(ctx context.Context) (*sshmgr.SSHSessionPool, error) {
 	key, err := osReadFile(keyPath)
 	if err != nil {
 		return nil, fmt.Errorf("could not load private key: %w", err)
@@ -203,11 +226,10 @@ func createSSHManager(ctx context.Context) (*sshmgr.SSHTunnelManager, error) {
 		ConnectTimeout:    connectTimeout,
 		FwdReqTimeout:     2 * time.Second,
 		KeepAliveInterval: keepAliveInterval,
-		RemoteAddrFunc: getRemoteAddress,
-		SessionLabel:   "plain",
+		RemoteAddrFunc:    getRemoteAddress,
 	}
 
-	return sshmgr.NewSSHTunnelManager(ctx, &sshConfig)
+	return sshmgr.NewSSHSessionPool(ctx, &sshConfig)
 }
 
 func getSvcHostname(svcName, svcNamespace string) string {

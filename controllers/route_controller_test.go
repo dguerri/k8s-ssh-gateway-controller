@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	sshmgr "github.com/dguerri/k8s-ssh-gateway-controller/ssh"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -279,16 +280,18 @@ func newRouteTestScheme() *runtime.Scheme {
 	return s
 }
 
-// newGatewayReconcilerForTest creates a real GatewayReconciler with mock SSH manager
+// newGatewayReconcilerForTest creates a real GatewayReconciler with mock SSH session pool
 // and pre-populated gateways map for use in route reconciler tests.
 // The Client field is intentionally left nil so that SetRoute/RemoveRoute skip
 // the updateGatewayStatus call. For tests that need a real client, set it after creation.
 func newGatewayReconcilerForTest(connected bool, listeners map[string]*Listener) *GatewayReconciler {
+	pool := newMockPool()
+	if !connected {
+		delete(pool.connectedKinds, sshmgr.SessionPlain)
+		pool.connectShouldFail = true
+	}
 	return &GatewayReconciler{
-		manager: &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     connected,
-		},
+		pool: pool,
 		gateways: map[string]*gateway{
 			"default/test-gw": {
 				listeners: listeners,
@@ -706,10 +709,7 @@ func TestHTTPRouteReconcile_SetRouteReturnsGatewayNotFound(t *testing.T) {
 
 	// Use a GatewayReconciler with empty gateways map so gateway is not found
 	gwReconciler := &GatewayReconciler{
-		manager: &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		},
+		pool:     newMockPool(),
 		gateways: map[string]*gateway{},
 	}
 
@@ -1369,20 +1369,18 @@ func TestHTTPRouteReconcile_HandleDeletion_RemoveRouteGenericError(t *testing.T)
 
 	backendHost := getSvcHostname("backend-svc", "default")
 	// Use a GatewayReconciler where StopForwarding returns a generic (non-GatewayNotFound/RouteNotFound) error
-	mockMgr := &mockSSHTunnelManager{
-		assignedAddrs:     map[string][]string{},
-		connected:         true,
-		stopForwardingErr: fmt.Errorf("SSH tunnel broken"),
-	}
+	mockPool := newMockPool()
+	mockPool.stopForwardingErr = fmt.Errorf("SSH tunnel broken")
 	gwReconciler := &GatewayReconciler{
-		manager: mockMgr,
+		pool: mockPool,
 		gateways: map[string]*gateway{
 			"default/test-gw": {
 				listeners: map[string]*Listener{
 					"http-listener": {
-						Hostname: "example.com",
-						Port:     80,
-						Protocol: "HTTP",
+						Hostname:    "example.com",
+						Port:        80,
+						Protocol:    "HTTP",
+						SessionKind: sshmgr.SessionPlain,
 						route: &Route{
 							Name:      "test-route",
 							Namespace: "default",
@@ -1468,10 +1466,7 @@ func TestHTTPRouteReconcile_HandleDeletion_UpdateFinalizerFails(t *testing.T) {
 
 	// Use a GatewayReconciler where RemoveRoute succeeds (gateway not found is acceptable during deletion)
 	gwReconciler := &GatewayReconciler{
-		manager: &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		},
+		pool:     newMockPool(),
 		gateways: map[string]*gateway{}, // Empty so RemoveRoute returns ErrGatewayNotFound (tolerated)
 	}
 
@@ -1598,17 +1593,14 @@ func TestHTTPRouteReconcile_HandleAddOrUpdate_SetRouteGenericError(t *testing.T)
 	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(gwClass, gw, httpRoute).Build()
 
 	// Use a GatewayReconciler where StartForwarding returns a generic error
-	mockMgr := &mockSSHTunnelManager{
-		assignedAddrs:      map[string][]string{},
-		connected:          true,
-		startForwardingErr: fmt.Errorf("generic SSH error"),
-	}
+	mockPool := newMockPool()
+	mockPool.startForwardingErr = fmt.Errorf("generic SSH error")
 	gwReconciler := &GatewayReconciler{
-		manager: mockMgr,
+		pool: mockPool,
 		gateways: map[string]*gateway{
 			"default/test-gw": {
 				listeners: map[string]*Listener{
-					"http-listener": {Hostname: "example.com", Port: 80, Protocol: "HTTP"},
+					"http-listener": {Hostname: "example.com", Port: 80, Protocol: "HTTP", SessionKind: sshmgr.SessionPlain},
 				},
 			},
 		},
@@ -1763,20 +1755,18 @@ func TestTCPRouteReconcile_HandleDeletion_RemoveRouteGenericError(t *testing.T) 
 	require.NoError(t, err)
 
 	backendHost := getSvcHostname("backend-svc", "default")
-	mockMgr := &mockSSHTunnelManager{
-		assignedAddrs:     map[string][]string{},
-		connected:         true,
-		stopForwardingErr: fmt.Errorf("SSH tunnel broken"),
-	}
+	mockPool := newMockPool()
+	mockPool.stopForwardingErr = fmt.Errorf("SSH tunnel broken")
 	gwReconciler := &GatewayReconciler{
-		manager: mockMgr,
+		pool: mockPool,
 		gateways: map[string]*gateway{
 			"default/test-gw": {
 				listeners: map[string]*Listener{
 					"tcp-listener": {
-						Hostname: "0.0.0.0",
-						Port:     3306,
-						Protocol: "TCP",
+						Hostname:    "0.0.0.0",
+						Port:        3306,
+						Protocol:    "TCP",
+						SessionKind: sshmgr.SessionPlain,
 						route: &Route{
 							Name:      "test-tcp-route",
 							Namespace: "default",
@@ -1856,10 +1846,7 @@ func TestTCPRouteReconcile_HandleDeletion_UpdateFinalizerFails(t *testing.T) {
 	})
 
 	gwReconciler := &GatewayReconciler{
-		manager: &mockSSHTunnelManager{
-			assignedAddrs: map[string][]string{},
-			connected:     true,
-		},
+		pool:     newMockPool(),
 		gateways: map[string]*gateway{}, // Empty so RemoveRoute returns ErrGatewayNotFound (tolerated)
 	}
 
@@ -1981,17 +1968,14 @@ func TestTCPRouteReconcile_HandleAddOrUpdate_SetRouteGenericError(t *testing.T) 
 
 	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(gwClass, gw, tcpRoute).Build()
 
-	mockMgr := &mockSSHTunnelManager{
-		assignedAddrs:      map[string][]string{},
-		connected:          true,
-		startForwardingErr: fmt.Errorf("generic SSH error"),
-	}
+	mockPool := newMockPool()
+	mockPool.startForwardingErr = fmt.Errorf("generic SSH error")
 	gwReconciler := &GatewayReconciler{
-		manager: mockMgr,
+		pool: mockPool,
 		gateways: map[string]*gateway{
 			"default/test-gw": {
 				listeners: map[string]*Listener{
-					"tcp-listener": {Hostname: "0.0.0.0", Port: 3306, Protocol: "TCP"},
+					"tcp-listener": {Hostname: "0.0.0.0", Port: 3306, Protocol: "TCP", SessionKind: sshmgr.SessionPlain},
 				},
 			},
 		},
