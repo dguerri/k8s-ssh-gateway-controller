@@ -1,0 +1,107 @@
+---
+# Example: multi-session GatewayClass with SNI passthrough + PROXY protocol enabled
+#
+# The ssh-gateway.io/sni-proxy annotation enables sish's sni-proxy session,
+# letting the gateway forward TLS connections to backends based on SNI without
+# terminating TLS. The ssh-gateway.io/proxy-protocol annotation enables a
+# second sish session that prepends PROXY protocol headers.
+#
+# Both annotations apply at the GatewayClass level. The controller opens up to
+# three sish sessions (plain, proxy-protocol, sni-proxy) from a single
+# Deployment and dispatches each listener to the appropriate session based on
+# its protocol/tls.mode and per-listener annotations.
+#
+# Equivalent SSH commands on a single deployment:
+#   ssh pico.sh                              (plain TCP/HTTP listeners)
+#   ssh pico.sh proxy-protocol=2             (TCP listeners opted in via per-listener annotation)
+#   ssh pico.sh sni-proxy=true               (TLS Passthrough listeners)
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: pico-sh-multi-cl
+  annotations:
+    ssh-gateway.io/proxy-protocol: "2"
+    ssh-gateway.io/sni-proxy: "true"
+spec:
+  controllerName: pico.sh/ssh-gateway-api-controller-multi
+
+---
+# Gateway with three listeners: plain TCP, PROXY-protocol TCP, and TLS Passthrough.
+#
+# The ssh-gateway.io/listener-proxy-protocol.<listenerName> annotation opts an
+# individual TCP listener into the PROXY-protocol session. Listeners without
+# this annotation use the plain session.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: pico-sh-multi-example
+  namespace: default
+  annotations:
+    ssh-gateway.io/listener-proxy-protocol.tcp-pp: "true"
+spec:
+  gatewayClassName: pico-sh-multi-cl
+  listeners:
+    - name: tcp-plain
+      protocol: TCP
+      port: 7000
+    - name: tcp-pp
+      protocol: TCP
+      port: 7001
+    - name: tls-passthrough
+      protocol: TLS
+      port: 443
+      tls:
+        mode: Passthrough
+
+---
+# TCPRoute attached to the plain TCP listener: traffic flows through the
+# plain sish session (no PROXY protocol).
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: TCPRoute
+metadata:
+  name: plain-tcp-example
+  namespace: default
+spec:
+  parentRefs:
+    - name: pico-sh-multi-example
+      sectionName: tcp-plain
+  rules:
+    - backendRefs:
+        - name: example-tcp-service
+          port: 9000
+
+---
+# TCPRoute attached to the PROXY-protocol-enabled TCP listener.
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: TCPRoute
+metadata:
+  name: pp-tcp-example
+  namespace: default
+spec:
+  parentRefs:
+    - name: pico-sh-multi-example
+      sectionName: tcp-pp
+  rules:
+    - backendRefs:
+        - name: example-pp-service
+          port: 9001
+
+---
+# TLSRoute attached to the TLS Passthrough listener: traffic flows through the
+# sni-proxy sish session. The backend terminates TLS; the gateway routes by SNI.
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: TLSRoute
+metadata:
+  name: tls-example
+  namespace: default
+spec:
+  parentRefs:
+    - name: pico-sh-multi-example
+      sectionName: tls-passthrough
+  hostnames:
+    - example.tuns.sh
+  rules:
+    - backendRefs:
+        - name: example-tls-service
+          port: 8443
