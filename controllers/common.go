@@ -42,7 +42,7 @@ const (
 // ClassSessionConfig holds the typed session configuration derived from
 // GatewayClass annotations.
 type ClassSessionConfig struct {
-	ProxyProtocolVersion int  // 0 = disabled, 1 or 2
+	ProxyProtocolVersion int // 0 = disabled, 1 or 2
 	SNIProxyEnabled      bool
 }
 

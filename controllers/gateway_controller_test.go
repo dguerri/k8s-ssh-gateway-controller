@@ -248,9 +248,12 @@ type stopCall struct {
 
 // mockSSHSessionPool is the test double for SSHSessionPoolInterface.
 type mockSSHSessionPool struct {
-	assignedAddrs        map[sshmgr.SessionKind]map[string][]string
-	connectedKinds       map[sshmgr.SessionKind]bool
-	configureCalls       []struct{ PP int; SNI bool }
+	assignedAddrs  map[sshmgr.SessionKind]map[string][]string
+	connectedKinds map[sshmgr.SessionKind]bool
+	configureCalls []struct {
+		PP  int
+		SNI bool
+	}
 	startForwardingCalls []startCall
 	stopForwardingCalls  []stopCall
 	startForwardingErr   error
@@ -267,7 +270,10 @@ func newMockPool() *mockSSHSessionPool {
 }
 
 func (m *mockSSHSessionPool) ConfigureSessions(pp int, sni bool) error {
-	m.configureCalls = append(m.configureCalls, struct{ PP int; SNI bool }{pp, sni})
+	m.configureCalls = append(m.configureCalls, struct {
+		PP  int
+		SNI bool
+	}{pp, sni})
 	if m.configureErr != nil {
 		return m.configureErr
 	}
@@ -2475,8 +2481,8 @@ func TestSupportedKindsFor(t *testing.T) {
 		{"HTTP", "HTTPRoute", false},
 		{"TCP", "TCPRoute", false},
 		{"TLS", "TLSRoute", false},
-		{"HTTPS", "", true},  // unknown → nil
-		{"UDP", "", true},    // unknown → nil
+		{"HTTPS", "", true}, // unknown → nil
+		{"UDP", "", true},   // unknown → nil
 	}
 	for _, tt := range tests {
 		t.Run(tt.protocol, func(t *testing.T) {
