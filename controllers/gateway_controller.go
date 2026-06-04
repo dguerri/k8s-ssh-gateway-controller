@@ -458,7 +458,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err := r.handleAddOrUpdateGateway(ctx, &k8sGw); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.updateGatewayStatusIfChanged(ctx, &k8sGw, key); err != nil {
+	if err := r.updateGatewayStatusIfChanged(ctx, &k8sGw, &gc, key); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -560,6 +560,70 @@ func (r *GatewayReconciler) updateGatewayAddresses(k8sGw *gatewayv1.Gateway) {
 	k8sGw.Status.Addresses = statusAddresses
 }
 
+// listenerProgrammedCondition computes the Programmed condition for a single
+// listener entry, given the current ClassSessionConfig in effect.
+func (r *GatewayReconciler) listenerProgrammedCondition(l *Listener, sessions ClassSessionConfig) metav1.Condition {
+	now := metav1.Now()
+	if l.Rejected {
+		return metav1.Condition{
+			Type:               string(gatewayv1.ListenerConditionProgrammed),
+			Status:             metav1.ConditionFalse,
+			Reason:             l.Reason,
+			Message:            "Listener rejected: " + l.Reason,
+			LastTransitionTime: now,
+		}
+	}
+	if l.SessionKind == sshmgr.SessionProxyProto && sessions.ProxyProtocolVersion == 0 {
+		return metav1.Condition{
+			Type:               string(gatewayv1.ListenerConditionProgrammed),
+			Status:             metav1.ConditionFalse,
+			Reason:             ReasonSessionNotEnabled,
+			Message:            "Listener requires proxy-protocol session but GatewayClass has not enabled it",
+			LastTransitionTime: now,
+		}
+	}
+	if l.SessionKind == sshmgr.SessionSNIProxy && !sessions.SNIProxyEnabled {
+		return metav1.Condition{
+			Type:               string(gatewayv1.ListenerConditionProgrammed),
+			Status:             metav1.ConditionFalse,
+			Reason:             ReasonSessionNotEnabled,
+			Message:            "Listener requires sni-proxy session but GatewayClass has not enabled it",
+			LastTransitionTime: now,
+		}
+	}
+	if !r.pool.IsConnected(l.SessionKind) {
+		return metav1.Condition{
+			Type:               string(gatewayv1.ListenerConditionProgrammed),
+			Status:             metav1.ConditionFalse,
+			Reason:             string(gatewayv1.ListenerReasonPending),
+			Message:            "SSH session not connected",
+			LastTransitionTime: now,
+		}
+	}
+	return metav1.Condition{
+		Type:               string(gatewayv1.ListenerConditionProgrammed),
+		Status:             metav1.ConditionTrue,
+		Reason:             string(gatewayv1.ListenerReasonProgrammed),
+		Message:            "Listener programmed",
+		LastTransitionTime: now,
+	}
+}
+
+// supportedKindsFor returns the RouteGroupKinds supported by a listener based on its protocol.
+func supportedKindsFor(l *Listener) []gatewayv1.RouteGroupKind {
+	grp := gatewayv1.Group("gateway.networking.k8s.io")
+	switch strings.ToUpper(l.Protocol) {
+	case "HTTP":
+		return []gatewayv1.RouteGroupKind{{Group: &grp, Kind: gatewayv1.Kind("HTTPRoute")}}
+	case "TCP":
+		return []gatewayv1.RouteGroupKind{{Group: &grp, Kind: gatewayv1.Kind("TCPRoute")}}
+	case "TLS":
+		return []gatewayv1.RouteGroupKind{{Group: &grp, Kind: gatewayv1.Kind("TLSRoute")}}
+	default:
+		return nil
+	}
+}
+
 // updateGatewayStatus fetches the Gateway resource and updates its status with current addresses.
 // This should be called after route attachment/removal to reflect address changes.
 func (r *GatewayReconciler) updateGatewayStatus(ctx context.Context, gwNamespace, gwName string) error {
@@ -569,6 +633,15 @@ func (r *GatewayReconciler) updateGatewayStatus(ctx context.Context, gwNamespace
 	if err := r.Get(ctx, client.ObjectKey{Namespace: gwNamespace, Name: gwName}, &k8sGw); err != nil {
 		slog.With("function", "updateGatewayStatus").Error("failed to fetch Gateway", "gateway", gwKey, "error", err)
 		return fmt.Errorf("failed to fetch Gateway %s: %w", gwKey, err)
+	}
+
+	// Fetch GatewayClass to compute listener conditions.
+	var gc gatewayv1.GatewayClass
+	if err := r.Get(ctx, client.ObjectKey{Name: string(k8sGw.Spec.GatewayClassName)}, &gc); err != nil {
+		slog.With("function", "updateGatewayStatus").Warn("failed to fetch GatewayClass, skipping listener conditions", "gateway", gwKey, "error", err)
+		// Don't fail the whole status update — addresses are still useful.
+	} else {
+		r.populateListenerStatuses(&k8sGw, &gc)
 	}
 
 	// Update addresses from SSH tunnel manager
@@ -584,10 +657,53 @@ func (r *GatewayReconciler) updateGatewayStatus(ctx context.Context, gwNamespace
 	return nil
 }
 
+// populateListenerStatuses fills k8sGw.Status.Listeners with per-listener Programmed
+// conditions and returns whether all listeners are programmed.
+func (r *GatewayReconciler) populateListenerStatuses(k8sGw *gatewayv1.Gateway, gc *gatewayv1.GatewayClass) bool {
+	sessions := parseClassSessionConfig(gc.Annotations)
+	gwKey := getGwKey(k8sGw.Namespace, k8sGw.Name)
+	gw, ok := r.gateways[gwKey]
+	if !ok {
+		return true
+	}
+	listenerStatuses := make([]gatewayv1.ListenerStatus, 0, len(k8sGw.Spec.Listeners))
+	allProgrammed := true
+	for _, k8sListener := range k8sGw.Spec.Listeners {
+		name := string(k8sListener.Name)
+		l, exists := gw.listeners[name]
+		if !exists {
+			continue
+		}
+		cond := r.listenerProgrammedCondition(l, sessions)
+		if cond.Status != metav1.ConditionTrue {
+			allProgrammed = false
+		}
+		listenerStatuses = append(listenerStatuses, gatewayv1.ListenerStatus{
+			Name:           k8sListener.Name,
+			Conditions:     []metav1.Condition{cond},
+			SupportedKinds: supportedKindsFor(l),
+		})
+	}
+	k8sGw.Status.Listeners = listenerStatuses
+	return allProgrammed
+}
+
 // updateGatewayStatusIfChanged updates the Gateway status in K8s if either conditions or addresses changed.
 // This ensures both conditions and addresses are persisted when they change, while avoiding unnecessary API calls.
-func (r *GatewayReconciler) updateGatewayStatusIfChanged(ctx context.Context, k8sGw *gatewayv1.Gateway, key string) error {
-	// Update Gateway status with Accepted=True and Programmed=True
+func (r *GatewayReconciler) updateGatewayStatusIfChanged(ctx context.Context, k8sGw *gatewayv1.Gateway, gc *gatewayv1.GatewayClass, key string) error {
+	// Populate per-listener Programmed conditions and determine aggregate state.
+	allProgrammed := r.populateListenerStatuses(k8sGw, gc)
+
+	progStatus := metav1.ConditionTrue
+	progReason := "Programmed"
+	progMsg := "Gateway programmed successfully"
+	if !allProgrammed {
+		progStatus = metav1.ConditionFalse
+		progReason = "ListenersNotProgrammed"
+		progMsg = "At least one listener is not Programmed"
+	}
+
+	// Update Gateway status with Accepted=True and Programmed based on listener state.
 	conditionsChanged := apiMeta.SetStatusCondition(&k8sGw.Status.Conditions, metav1.Condition{
 		Type:               string(gatewayv1.GatewayConditionAccepted),
 		Status:             metav1.ConditionTrue,
@@ -597,9 +713,9 @@ func (r *GatewayReconciler) updateGatewayStatusIfChanged(ctx context.Context, k8
 	})
 	conditionsChanged = apiMeta.SetStatusCondition(&k8sGw.Status.Conditions, metav1.Condition{
 		Type:               string(gatewayv1.GatewayConditionProgrammed),
-		Status:             metav1.ConditionTrue,
-		Reason:             "Programmed",
-		Message:            "Gateway programmed successfully",
+		Status:             progStatus,
+		Reason:             progReason,
+		Message:            progMsg,
 		LastTransitionTime: metav1.Now(),
 	}) || conditionsChanged
 
