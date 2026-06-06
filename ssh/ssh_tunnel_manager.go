@@ -435,8 +435,8 @@ const (
 )
 
 // MatchesRequestedHost checks if any of the extracted URIs match the requested hostname/port.
-// For HTTP/HTTPS URIs: checks if the hostname contains the requested host (wildcard hostnames
-// — "", "0.0.0.0", "localhost" — accept any assignment).
+// For HTTP/HTTPS URIs: checks if the URI host equals requestedHost (see httpURIHasHost;
+// wildcard hostnames — "", "0.0.0.0", "localhost" — accept any assignment).
 // For TCP URIs:
 //   - When the hostname is specific, the URI must contain "host:port".
 //   - When the hostname is wildcard and enforcePort is true, the URI port must equal requestedPort.
@@ -450,7 +450,7 @@ func MatchesRequestedHost(uris []string, requestedHost string, requestedPort int
 			if hostnameWildcard {
 				return true
 			}
-			if strings.Contains(uri, requestedHost) {
+			if httpURIHasHost(uri, requestedHost) {
 				return true
 			}
 			continue
@@ -477,6 +477,39 @@ func MatchesRequestedHost(uris []string, requestedHost string, requestedPort int
 		}
 	}
 	return false
+}
+
+// httpURIHasHost reports whether an "http://" or "https://" URI's host
+// component equals requestedHost. The host must appear immediately after the
+// scheme and be followed by a host boundary — end of string, "/" (path),
+// or ":" (port) — so that a requested host of "dev" does NOT match a URI like
+// "http://user-dev.example.com" and a host does NOT match inside a path.
+func httpURIHasHost(uri, requestedHost string) bool {
+	var rest string
+	switch {
+	case strings.HasPrefix(uri, "http://"):
+		rest = strings.TrimPrefix(uri, "http://")
+	case strings.HasPrefix(uri, "https://"):
+		rest = strings.TrimPrefix(uri, "https://")
+	default:
+		return false
+	}
+
+	if !strings.HasPrefix(rest, requestedHost) {
+		return false
+	}
+
+	// Character immediately after the host must be a boundary.
+	remainder := rest[len(requestedHost):]
+	if remainder == "" {
+		return true
+	}
+	switch remainder[0] {
+	case '/', ':':
+		return true
+	default:
+		return false
+	}
 }
 
 // tcpURIPort extracts the port from a "tcp://host:port" URI. Returns (0, false)
