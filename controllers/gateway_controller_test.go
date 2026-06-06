@@ -512,7 +512,21 @@ func TestIsForwardingValid(t *testing.T) {
 			assignedAddrs: map[string][]string{
 				"api.example.com:80": {"http://my-api.example.com"},
 			},
-			expected: true, // Contains "api.example.com"
+			// "api.example.com" must NOT match the host "my-api.example.com":
+			// the requested host has to be the full URI host, not a substring.
+			expected: false,
+		},
+		{
+			name: "exact hostname match without trailing slash",
+			listener: &Listener{
+				Hostname:    "api.example.com",
+				Port:        80,
+				SessionKind: sshmgr.SessionPlain,
+			},
+			assignedAddrs: map[string][]string{
+				"api.example.com:80": {"http://api.example.com"},
+			},
+			expected: true,
 		},
 		{
 			name: "TCP listener with localhost and matching port",

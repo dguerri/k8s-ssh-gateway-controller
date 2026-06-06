@@ -479,18 +479,60 @@ func TestMatchesRequestedHost(t *testing.T) {
 			expected:      true,
 		},
 		{
-			name:          "HTTP URI with matching hostname",
-			uris:          []string{"http://user-dev.example.com"},
-			requestedHost: "dev",
+			name:          "HTTP URI with matching hostname (no trailing slash)",
+			uris:          []string{"http://dev.example.com"},
+			requestedHost: "dev.example.com",
 			requestedPort: 8080,
 			expected:      true,
 		},
 		{
-			name:          "HTTPS URI with matching hostname",
-			uris:          []string{"https://user-dev.example.com"},
-			requestedHost: "dev",
+			name:          "HTTPS URI with matching hostname (no trailing slash)",
+			uris:          []string{"https://dev.example.com"},
+			requestedHost: "dev.example.com",
 			requestedPort: 8080,
 			expected:      true,
+		},
+		{
+			name:          "HTTP URI with matching hostname (trailing slash)",
+			uris:          []string{"http://dev.example.com/"},
+			requestedHost: "dev.example.com",
+			requestedPort: 8080,
+			expected:      true,
+		},
+		{
+			name:          "HTTPS URI with matching hostname and port",
+			uris:          []string{"https://dev.example.com:8443"},
+			requestedHost: "dev.example.com",
+			requestedPort: 8080,
+			expected:      true,
+		},
+		{
+			name:          "HTTP URI substring does not match (longer hostname)",
+			uris:          []string{"http://user-dev.example.com"},
+			requestedHost: "dev.example.com",
+			requestedPort: 8080,
+			expected:      false,
+		},
+		{
+			name:          "HTTP URI substring does not match (trailing)",
+			uris:          []string{"http://dev.example.com.nue.tuns.sh"},
+			requestedHost: "dev.example.com",
+			requestedPort: 8080,
+			expected:      false,
+		},
+		{
+			name:          "HTTP URI prefix does not match (no boundary)",
+			uris:          []string{"http://dev.example.com"},
+			requestedHost: "dev.example",
+			requestedPort: 8080,
+			expected:      false,
+		},
+		{
+			name:          "HTTP URI host does not match inside path",
+			uris:          []string{"http://other.com/dev.example.com"},
+			requestedHost: "dev.example.com",
+			requestedPort: 8080,
+			expected:      false,
 		},
 		{
 			name:          "TCP URI with exact match",
@@ -793,7 +835,7 @@ func TestSendForwardingWithAddressVerification(t *testing.T) {
 
 		// Mock remoteAddrFunc that extracts URIs
 		remoteAddrFunc := func(data string) ([]string, error) {
-			return []string{"https://user-dev.example.com"}, nil
+			return []string{"https://user-dev.example.com/"}, nil
 		}
 
 		sshConfig := SSHConnectionConfig{
@@ -818,7 +860,7 @@ func TestSendForwardingWithAddressVerification(t *testing.T) {
 		}
 
 		fwd := ForwardingConfig{
-			RemoteHost:   "dev",
+			RemoteHost:   "user-dev.example.com",
 			RemotePort:   8080,
 			InternalHost: "localhost",
 			InternalPort: 8080,
@@ -830,7 +872,7 @@ func TestSendForwardingWithAddressVerification(t *testing.T) {
 			key := forwardingKey(fwd.RemoteHost, fwd.RemotePort)
 			manager.addrNotifMu.Lock()
 			if ch, ok := manager.addrNotifications[key]; ok {
-				ch <- []string{"https://user-dev.example.com"}
+				ch <- []string{"https://user-dev.example.com/"}
 			}
 			manager.addrNotifMu.Unlock()
 		}()
@@ -841,8 +883,8 @@ func TestSendForwardingWithAddressVerification(t *testing.T) {
 		}
 
 		// Verify assigned addresses were stored
-		addrs := manager.GetAssignedAddresses("dev", 8080)
-		if len(addrs) != 1 || addrs[0] != "https://user-dev.example.com" {
+		addrs := manager.GetAssignedAddresses("user-dev.example.com", 8080)
+		if len(addrs) != 1 || addrs[0] != "https://user-dev.example.com/" {
 			t.Errorf("Expected assigned addresses to be stored, got: %v", addrs)
 		}
 	})
