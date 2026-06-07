@@ -433,15 +433,8 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	key := fmt.Sprintf("%s/%s", req.Namespace, req.Name)
 	slog.With("function", "Reconcile").Debug("reconciling Gateway", "gateway", key, "request", req)
 
-	// Plain session is always required. Check it before touching Kubernetes so
-	// controller startup and transient API misses still exercise the reconnect loop.
-	if !r.pool.IsConnected(sshmgr.SessionPlain) {
-		slog.With("function", "Reconcile").Info("SSH plain session disconnected, attempting reconnect")
-		r.pool.Connect()
-		if !r.pool.IsConnected(sshmgr.SessionPlain) {
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-		}
-		slog.With("function", "Reconcile").Info("SSH plain session established/restored")
+	if ok := r.ensurePlainSSHSessionConnected(); !ok {
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
 	var k8sGw gatewayv1.Gateway
@@ -453,33 +446,15 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	isManagedByUs := containsString(k8sGw.Finalizers, getGatewayFinalizer())
 
 	if !k8sGw.DeletionTimestamp.IsZero() {
-		if isManagedByUs {
-			// Handle deletion
-			slog.With("function", "Reconcile", "gateway", req.NamespacedName).Info("processing gateway deletion")
-			r.handleDeleteGateway(ctx, &k8sGw)
-			k8sGw.Finalizers = removeString(k8sGw.Finalizers, getGatewayFinalizer())
-			if err := r.Update(ctx, &k8sGw); err != nil {
-				slog.With("function", "Reconcile").Error("failed to remove finalizer", "gateway", key, "error", err)
-				return ctrl.Result{}, err
-			}
-		} else {
-			slog.With("function", "Reconcile", "gateway", req.NamespacedName).Debug("gateway being deleted but not managed by us, skipping")
-		}
-		return ctrl.Result{}, nil
+		return r.reconcileGatewayDelete(ctx, &k8sGw, req.NamespacedName, key, isManagedByUs)
 	}
 
-	// Fetch GatewayClass to check ownership and read annotations
-	var gc gatewayv1.GatewayClass
-	if err := r.Get(ctx, client.ObjectKey{Name: string(k8sGw.Spec.GatewayClassName)}, &gc); err != nil {
+	gc, owned, err := r.gatewayClassIfManaged(ctx, &k8sGw, isManagedByUs)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
-
-	if !isManagedByUs {
-		controllerName := getGatewayControllerName()
-		if string(gc.Spec.ControllerName) != controllerName {
-			slog.With("function", "Reconcile").Debug("skipping Gateway: does not match controllerName", "gatewayClassName", k8sGw.Spec.GatewayClassName)
-			return ctrl.Result{}, nil
-		}
+	if !owned {
+		return ctrl.Result{}, nil
 	}
 
 	// Configure sessions based on GatewayClass annotations
@@ -495,22 +470,90 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// Handle add or update
 	slog.With("function", "Reconcile", "gateway", req.NamespacedName).Debug("adding or updating gateway")
-	if !containsString(k8sGw.Finalizers, getGatewayFinalizer()) {
-		k8sGw.Finalizers = append(k8sGw.Finalizers, getGatewayFinalizer())
-		if err := r.Update(ctx, &k8sGw); err != nil {
-			slog.With("function", "Reconcile").Error("failed to add finalizer", "gateway", key, "error", err)
-			return ctrl.Result{}, err
-		}
+	if err := r.ensureGatewayFinalizer(ctx, &k8sGw, key); err != nil {
+		return ctrl.Result{}, err
 	}
 	if err := r.handleAddOrUpdateGateway(ctx, &k8sGw); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.updateGatewayStatusIfChanged(ctx, &k8sGw, &gc, key); err != nil {
+	if err := r.updateGatewayStatusIfChanged(ctx, &k8sGw, gc, key); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	// Periodically requeue to check SSH connection health and update status
 	return ctrl.Result{RequeueAfter: gatewayReconcilePeriod}, nil
+}
+
+func (r *GatewayReconciler) ensurePlainSSHSessionConnected() bool {
+	// Plain session is always required. Check it before touching Kubernetes so
+	// controller startup and transient API misses still exercise the reconnect loop.
+	if r.pool.IsConnected(sshmgr.SessionPlain) {
+		return true
+	}
+
+	slog.With("function", "Reconcile").Info("SSH plain session disconnected, attempting reconnect")
+	r.pool.Connect()
+	if !r.pool.IsConnected(sshmgr.SessionPlain) {
+		return false
+	}
+	slog.With("function", "Reconcile").Info("SSH plain session established/restored")
+	return true
+}
+
+func (r *GatewayReconciler) reconcileGatewayDelete(
+	ctx context.Context,
+	k8sGw *gatewayv1.Gateway,
+	gatewayName client.ObjectKey,
+	key string,
+	isManagedByUs bool,
+) (ctrl.Result, error) {
+	if !isManagedByUs {
+		slog.With("function", "Reconcile", "gateway", gatewayName).Debug("gateway being deleted but not managed by us, skipping")
+		return ctrl.Result{}, nil
+	}
+
+	slog.With("function", "Reconcile", "gateway", gatewayName).Info("processing gateway deletion")
+	r.handleDeleteGateway(ctx, k8sGw)
+	k8sGw.Finalizers = removeString(k8sGw.Finalizers, getGatewayFinalizer())
+	if err := r.Update(ctx, k8sGw); err != nil {
+		slog.With("function", "Reconcile").Error("failed to remove finalizer", "gateway", key, "error", err)
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func (r *GatewayReconciler) gatewayClassIfManaged(ctx context.Context, k8sGw *gatewayv1.Gateway, isManagedByUs bool) (*gatewayv1.GatewayClass, bool, error) {
+	var gc gatewayv1.GatewayClass
+	if err := r.Get(ctx, client.ObjectKey{Name: string(k8sGw.Spec.GatewayClassName)}, &gc); err != nil {
+		return nil, false, err
+	}
+
+	if isManagedByUs {
+		return &gc, true, nil
+	}
+
+	controllerName := getGatewayControllerName()
+	if string(gc.Spec.ControllerName) != controllerName {
+		slog.With("function", "Reconcile").Debug("skipping Gateway: does not match controllerName", "gatewayClassName", k8sGw.Spec.GatewayClassName)
+		return nil, false, nil
+	}
+
+	return &gc, true, nil
+}
+
+func (r *GatewayReconciler) ensureGatewayFinalizer(ctx context.Context, k8sGw *gatewayv1.Gateway, key string) error {
+	if containsString(k8sGw.Finalizers, getGatewayFinalizer()) {
+		return nil
+	}
+
+	k8sGw.Finalizers = append(k8sGw.Finalizers, getGatewayFinalizer())
+	if err := r.Update(ctx, k8sGw); err != nil {
+		slog.With("function", "Reconcile").Error("failed to add finalizer", "gateway", key, "error", err)
+		return err
+	}
+
+	return nil
 }
 
 // gatewayAddressesEqual compares two slices of GatewayStatusAddress for equality.

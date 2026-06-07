@@ -2109,6 +2109,148 @@ func TestUpdateGatewayStatusIfChanged(t *testing.T) {
 	})
 }
 
+func TestGatewayReconciler_EnsureGatewayFinalizer(t *testing.T) {
+	t.Run("already present does not update", func(t *testing.T) {
+		s := newGatewayTestScheme()
+		finalizer := getGatewayFinalizer()
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       "test-gw",
+				Namespace:  "test-ns",
+				Finalizers: []string{finalizer},
+			},
+		}
+
+		baseFakeClient := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(k8sGw).
+			Build()
+		wrappedClient := interceptor.NewClient(baseFakeClient, interceptor.Funcs{
+			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				return errors.New("unexpected update")
+			},
+		})
+
+		reconciler := &GatewayReconciler{
+			Client: wrappedClient,
+			Scheme: s,
+		}
+
+		err := reconciler.ensureGatewayFinalizer(context.Background(), k8sGw, "test-ns/test-gw")
+
+		assert.NoError(t, err)
+		assert.Equal(t, []string{finalizer}, k8sGw.Finalizers)
+	})
+
+	t.Run("adds missing finalizer", func(t *testing.T) {
+		s := newGatewayTestScheme()
+		finalizer := getGatewayFinalizer()
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gw",
+				Namespace: "test-ns",
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(k8sGw).
+			Build()
+
+		reconciler := &GatewayReconciler{
+			Client: fakeClient,
+			Scheme: s,
+		}
+
+		err := reconciler.ensureGatewayFinalizer(context.Background(), k8sGw, "test-ns/test-gw")
+
+		assert.NoError(t, err)
+		assert.Contains(t, k8sGw.Finalizers, finalizer)
+
+		var updated gatewayv1.Gateway
+		err = fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "test-ns", Name: "test-gw"}, &updated)
+		assert.NoError(t, err)
+		assert.Contains(t, updated.Finalizers, finalizer)
+	})
+
+	t.Run("returns update error", func(t *testing.T) {
+		s := newGatewayTestScheme()
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gw",
+				Namespace: "test-ns",
+			},
+		}
+		updateErr := errors.New("simulated update failure")
+
+		baseFakeClient := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(k8sGw).
+			Build()
+		wrappedClient := interceptor.NewClient(baseFakeClient, interceptor.Funcs{
+			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				return updateErr
+			},
+		})
+
+		reconciler := &GatewayReconciler{
+			Client: wrappedClient,
+			Scheme: s,
+		}
+
+		err := reconciler.ensureGatewayFinalizer(context.Background(), k8sGw, "test-ns/test-gw")
+
+		assert.ErrorIs(t, err, updateErr)
+		assert.Contains(t, k8sGw.Finalizers, getGatewayFinalizer())
+	})
+}
+
+func TestGatewayReconciler_ReconcileGatewayDelete_UpdateFails(t *testing.T) {
+	s := newGatewayTestScheme()
+	finalizer := getGatewayFinalizer()
+	k8sGw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-gw",
+			Namespace:  "test-ns",
+			Finalizers: []string{finalizer},
+		},
+	}
+	updateErr := errors.New("simulated finalizer removal failure")
+
+	baseFakeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(k8sGw).
+		Build()
+	wrappedClient := interceptor.NewClient(baseFakeClient, interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			return updateErr
+		},
+	})
+
+	reconciler := &GatewayReconciler{
+		Client: wrappedClient,
+		Scheme: s,
+		pool:   newMockPool(),
+		gateways: map[string]*gateway{
+			"test-ns/test-gw": {
+				listeners: map[string]*Listener{},
+			},
+		},
+	}
+
+	result, err := reconciler.reconcileGatewayDelete(
+		context.Background(),
+		k8sGw,
+		types.NamespacedName{Namespace: "test-ns", Name: "test-gw"},
+		"test-ns/test-gw",
+		true,
+	)
+
+	assert.Equal(t, ctrl.Result{}, result)
+	assert.ErrorIs(t, err, updateErr)
+	assert.NotContains(t, k8sGw.Finalizers, finalizer)
+}
+
 // --- Tests for setupRouteForwarding edge cases ---
 
 func TestSetupRouteForwarding(t *testing.T) {
