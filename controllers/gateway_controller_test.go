@@ -248,9 +248,10 @@ type stopCall struct {
 
 // mockSSHSessionPool is the test double for SSHSessionPoolInterface.
 type mockSSHSessionPool struct {
-	assignedAddrs  map[sshmgr.SessionKind]map[string][]string
-	connectedKinds map[sshmgr.SessionKind]bool
-	configureCalls []struct {
+	assignedAddrs   map[sshmgr.SessionKind]map[string][]string
+	connectedKinds  map[sshmgr.SessionKind]bool
+	configuredKinds map[sshmgr.SessionKind]bool
+	configureCalls  []struct {
 		PP  int
 		SNI bool
 	}
@@ -259,13 +260,14 @@ type mockSSHSessionPool struct {
 	startForwardingErr   error
 	stopForwardingErr    error
 	configureErr         error
-	connectShouldFail    bool // when true Connect() does not establish the plain session
+	connectShouldFail    bool // when true Connect() does not establish configured sessions
 }
 
 func newMockPool() *mockSSHSessionPool {
 	return &mockSSHSessionPool{
-		assignedAddrs:  map[sshmgr.SessionKind]map[string][]string{},
-		connectedKinds: map[sshmgr.SessionKind]bool{sshmgr.SessionPlain: true},
+		assignedAddrs:   map[sshmgr.SessionKind]map[string][]string{},
+		connectedKinds:  map[sshmgr.SessionKind]bool{sshmgr.SessionPlain: true},
+		configuredKinds: map[sshmgr.SessionKind]bool{sshmgr.SessionPlain: true},
 	}
 }
 
@@ -278,14 +280,22 @@ func (m *mockSSHSessionPool) ConfigureSessions(pp int, sni bool) error {
 		return m.configureErr
 	}
 	if pp > 0 {
-		m.connectedKinds[sshmgr.SessionProxyProto] = true
+		if !m.configuredKinds[sshmgr.SessionProxyProto] && !m.connectShouldFail {
+			m.connectedKinds[sshmgr.SessionProxyProto] = true
+		}
+		m.configuredKinds[sshmgr.SessionProxyProto] = true
 	} else {
 		delete(m.connectedKinds, sshmgr.SessionProxyProto)
+		delete(m.configuredKinds, sshmgr.SessionProxyProto)
 	}
 	if sni {
-		m.connectedKinds[sshmgr.SessionSNIProxy] = true
+		if !m.configuredKinds[sshmgr.SessionSNIProxy] && !m.connectShouldFail {
+			m.connectedKinds[sshmgr.SessionSNIProxy] = true
+		}
+		m.configuredKinds[sshmgr.SessionSNIProxy] = true
 	} else {
 		delete(m.connectedKinds, sshmgr.SessionSNIProxy)
+		delete(m.configuredKinds, sshmgr.SessionSNIProxy)
 	}
 	return nil
 }
@@ -313,7 +323,9 @@ func (m *mockSSHSessionPool) IsConnected(kind sshmgr.SessionKind) bool {
 
 func (m *mockSSHSessionPool) Connect() {
 	if !m.connectShouldFail {
-		m.connectedKinds[sshmgr.SessionPlain] = true
+		for kind := range m.configuredKinds {
+			m.connectedKinds[kind] = true
+		}
 	}
 }
 func (m *mockSSHSessionPool) Stop() {}
@@ -1433,6 +1445,109 @@ func TestGatewayReconciler_Reconcile(t *testing.T) {
 		assert.True(t, mockPool.connectedKinds[sshmgr.SessionPlain], "plain session should be connected after reconnect")
 	})
 
+	t.Run("configured proxy-protocol session disconnected reconnects", func(t *testing.T) {
+		t.Setenv("GATEWAY_CONTROLLER_NAME", "test-controller")
+		s := newGatewayTestScheme()
+
+		gc := &gatewayv1.GatewayClass{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "my-class",
+				Annotations: map[string]string{
+					annotationProxyProtocol: "2",
+				},
+			},
+			Spec: gatewayv1.GatewayClassSpec{
+				ControllerName: "test-controller",
+			},
+		}
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gw",
+				Namespace: "test-ns",
+			},
+			Spec: gatewayv1.GatewaySpec{
+				GatewayClassName: "my-class",
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(gc, k8sGw).
+			WithStatusSubresource(&gatewayv1.Gateway{}).
+			Build()
+
+		mockPool := newMockPool()
+		mockPool.configuredKinds[sshmgr.SessionProxyProto] = true
+		delete(mockPool.connectedKinds, sshmgr.SessionProxyProto)
+
+		reconciler := &GatewayReconciler{
+			Client:   fakeClient,
+			Scheme:   s,
+			pool:     mockPool,
+			gateways: map[string]*gateway{},
+		}
+
+		result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: "test-ns", Name: "test-gw"},
+		})
+
+		assert.NoError(t, err)
+		assert.Equal(t, gatewayReconcilePeriod, result.RequeueAfter)
+		assert.True(t, mockPool.connectedKinds[sshmgr.SessionProxyProto], "proxy-protocol session should be connected after reconnect")
+	})
+
+	t.Run("configured sni session disconnected reconnect fails requeues after 10s", func(t *testing.T) {
+		t.Setenv("GATEWAY_CONTROLLER_NAME", "test-controller")
+		s := newGatewayTestScheme()
+
+		gc := &gatewayv1.GatewayClass{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "my-class",
+				Annotations: map[string]string{
+					annotationSNIProxy: "true",
+				},
+			},
+			Spec: gatewayv1.GatewayClassSpec{
+				ControllerName: "test-controller",
+			},
+		}
+		k8sGw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gw",
+				Namespace: "test-ns",
+			},
+			Spec: gatewayv1.GatewaySpec{
+				GatewayClassName: "my-class",
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(gc, k8sGw).
+			WithStatusSubresource(&gatewayv1.Gateway{}).
+			Build()
+
+		mockPool := newMockPool()
+		mockPool.configuredKinds[sshmgr.SessionSNIProxy] = true
+		delete(mockPool.connectedKinds, sshmgr.SessionSNIProxy)
+		mockPool.connectShouldFail = true
+
+		reconciler := &GatewayReconciler{
+			Client:   fakeClient,
+			Scheme:   s,
+			pool:     mockPool,
+			gateways: map[string]*gateway{},
+		}
+
+		result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: "test-ns", Name: "test-gw"},
+		})
+
+		assert.NoError(t, err)
+		assert.Equal(t, 10*time.Second, result.RequeueAfter)
+		assert.False(t, mockPool.connectedKinds[sshmgr.SessionSNIProxy], "sni session should remain disconnected when reconnect fails")
+	})
+
 	t.Run("SSH disconnected reconnect fails requeues after 10s", func(t *testing.T) {
 		t.Setenv("GATEWAY_CONTROLLER_NAME", "test-controller")
 		s := newGatewayTestScheme()
@@ -2069,6 +2184,7 @@ func TestSetupRouteForwarding(t *testing.T) {
 	t.Run("SSH not connected returns ErrGatewayNotReady", func(t *testing.T) {
 		mockPool := newMockPool()
 		delete(mockPool.connectedKinds, sshmgr.SessionPlain) // not connected
+		mockPool.connectShouldFail = true
 
 		listener := &Listener{
 			Hostname:    "example.com",

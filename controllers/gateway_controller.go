@@ -108,6 +108,43 @@ type GatewayReconciler struct {
 	gatewaysMu sync.Mutex
 }
 
+func requiredSessionKinds(sessions ClassSessionConfig) []sshmgr.SessionKind {
+	kinds := []sshmgr.SessionKind{sshmgr.SessionPlain}
+	if sessions.ProxyProtocolVersion > 0 {
+		kinds = append(kinds, sshmgr.SessionProxyProto)
+	}
+	if sessions.SNIProxyEnabled {
+		kinds = append(kinds, sshmgr.SessionSNIProxy)
+	}
+	return kinds
+}
+
+func (r *GatewayReconciler) reconnectRequiredSessions(sessions ClassSessionConfig) bool {
+	required := requiredSessionKinds(sessions)
+	disconnected := false
+	for _, kind := range required {
+		if !r.pool.IsConnected(kind) {
+			disconnected = true
+			break
+		}
+	}
+	if !disconnected {
+		return true
+	}
+
+	slog.With("function", "Reconcile").Info("SSH session disconnected, attempting reconnect")
+	r.pool.Connect()
+	for _, kind := range required {
+		if !r.pool.IsConnected(kind) {
+			slog.With("function", "Reconcile").Warn("SSH session still disconnected after reconnect",
+				"session", kind.String())
+			return false
+		}
+	}
+	slog.With("function", "Reconcile").Info("SSH sessions established/restored")
+	return true
+}
+
 // isRouteAlreadyAttached checks if the route is already correctly attached to the listener
 func isRouteAlreadyAttached(l *Listener, routeName, routeNamespace, backendHost string, backendPort int) bool {
 	return l.route != nil &&
@@ -169,11 +206,18 @@ func (r *GatewayReconciler) setupRouteForwarding(l *Listener, gwKey, routeName, 
 
 	// Check SSH connection status
 	if !r.pool.IsConnected(l.SessionKind) {
-		slog.With("function", "setupRouteForwarding").Warn("SSH manager is not connected, cannot start forwarding",
+		slog.With("function", "setupRouteForwarding").Warn("SSH manager is not connected, attempting reconnect",
 			"gateway", gwKey,
 			"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
 			"listener", listenerName)
-		return &ErrGatewayNotReady{msg: "SSH client not connected"}
+		r.pool.Connect()
+		if !r.pool.IsConnected(l.SessionKind) {
+			slog.With("function", "setupRouteForwarding").Warn("SSH manager is not connected, cannot start forwarding",
+				"gateway", gwKey,
+				"route", fmt.Sprintf("%s/%s", routeNamespace, routeName),
+				"listener", listenerName)
+			return &ErrGatewayNotReady{msg: "SSH client not connected"}
+		}
 	}
 
 	// Start forwarding. For TCP listeners pinning a specific port, require the
@@ -389,15 +433,15 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	key := fmt.Sprintf("%s/%s", req.Namespace, req.Name)
 	slog.With("function", "Reconcile").Debug("reconciling Gateway", "gateway", key, "request", req)
 
-	// Check and maintain SSH connection (plain session is always required)
+	// Plain session is always required. Check it before touching Kubernetes so
+	// controller startup and transient API misses still exercise the reconnect loop.
 	if !r.pool.IsConnected(sshmgr.SessionPlain) {
 		slog.With("function", "Reconcile").Info("SSH plain session disconnected, attempting reconnect")
 		r.pool.Connect()
 		if !r.pool.IsConnected(sshmgr.SessionPlain) {
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
-		slog.With("function", "Reconcile").Info("SSH connection established/restored")
-		// Route controllers will detect reconnection and restore forwardings via periodic reconciliation
+		slog.With("function", "Reconcile").Info("SSH plain session established/restored")
 	}
 
 	var k8sGw gatewayv1.Gateway
@@ -443,6 +487,9 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err := r.pool.ConfigureSessions(sessions.ProxyProtocolVersion, sessions.SNIProxyEnabled); err != nil {
 		slog.With("function", "Reconcile").Error("failed to configure SSH sessions",
 			"gatewayClass", gc.Name, "error", err)
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+	if !r.reconnectRequiredSessions(sessions) {
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
