@@ -1629,16 +1629,14 @@ func TestHandleChannelsClosesBothEndsOnOneSidedEOF(t *testing.T) {
 	}
 }
 
-// TestWrongPortCancelUsesBoundPort verifies that when the SSH server returns a
-// TCP URI bound to a port different from the one we requested
+// TestWrongPortCancelUsesRequestedPort verifies that when the SSH server returns
+// a TCP URI bound to a port different from the one we requested
 // (EnforcePort=true), the resulting cancel-tcpip-forward targets the
-// server-bound port rather than the originally-requested port. Canceling the
-// requested port would leak the random port the server actually bound.
-//
-// Regression: previously handleAssignedURIs sent cancel for fwd.RemotePort,
-// causing observed tuns.sh behavior where each retry leaked another random
-// port on the server.
-func TestWrongPortCancelUsesBoundPort(t *testing.T) {
+// originally-requested port, NOT the server-bound port. sish keys
+// cancel-tcpip-forward on the original requested bind address+port
+// (holder.OriginalAddr/OriginalPort), so canceling the bound port never matches
+// the server's listener and leaks it.
+func TestWrongPortCancelUsesRequestedPort(t *testing.T) {
 	SetupTest(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1717,9 +1715,10 @@ func TestWrongPortCancelUsesBoundPort(t *testing.T) {
 	}
 
 	// Locate the wrong-hostname-cleanup cancel call. We tolerate extra
-	// cancels for the pre-emptive cleanup (requestedPort) and orphan
-	// cancels for the default fake channel (0.0.0.0:2222) — only the
-	// cleanup of the actually-bound port is what we assert here.
+	// cancels for the pre-emptive cleanup (requestedPort, before tcpip-forward)
+	// and orphan cancels for the default fake channel (0.0.0.0:2222) — what we
+	// assert is that the cleanup cancels the originally-requested port (which
+	// sish keys its listener on) and never the server-bound port.
 	callsMu.Lock()
 	defer callsMu.Unlock()
 
@@ -1741,11 +1740,120 @@ func TestWrongPortCancelUsesBoundPort(t *testing.T) {
 		}
 	}
 
-	if !foundBoundCancel {
-		t.Errorf("expected cancel-tcpip-forward for bound port %d, calls=%+v", boundPort, calls)
+	if !foundRequestedCancelAfterTcpip {
+		t.Errorf("expected cancel-tcpip-forward for requested port %d after tcpip-forward (sish keys cancel on the original requested port), calls=%+v", requestedPort, calls)
 	}
-	if foundRequestedCancelAfterTcpip {
-		t.Errorf("did not expect cancel-tcpip-forward for requested port %d after tcpip-forward (would leak bound port), calls=%+v", requestedPort, calls)
+	if foundBoundCancel {
+		t.Errorf("did not expect cancel-tcpip-forward for server-bound port %d (sish does not key cancel on the bound port), calls=%+v", boundPort, calls)
+	}
+}
+
+// TestWrongHostnameCancelHTTPUsesRequestedHostPort verifies that when the SSH
+// server assigns the wrong hostname for an HTTP/HTTPS forwarding (the URIs are
+// http://… / https://…, never tcp://…), the cleanup still sends a
+// cancel-tcpip-forward for the originally-requested host:port. The wire request
+// was sent with (RemoteHost, RemotePort), so per RFC 4254 the cancel must use
+// the same values.
+//
+// Regression: handleAssignedURIs only canceled tcp:// URIs, so wrong-hostname
+// HTTP/HTTPS tunnels (e.g. pico.sh web tunnels) leaked on the server — no
+// cancel was sent at all.
+func TestWrongHostnameCancelHTTPUsesRequestedHostPort(t *testing.T) {
+	SetupTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const requestedHost = "myapp.nue.tuns.sh"
+	const requestedPort = 80
+
+	var (
+		callsMu sync.Mutex
+		calls   []forwardRequestRecord
+	)
+
+	remoteAddrFunc := func(data string) ([]string, error) {
+		return []string{"https://random.nue.tuns.sh"}, nil
+	}
+
+	var currentManager *SSHTunnelManager
+	sshDial = func(network, addr string, cfg *ssh.ClientConfig) (sshClient, error) {
+		client := &fakeClient{}
+		client.sendRequestFunc = recordingSendRequest(&callsMu, &calls,
+			func(name string, wantReply bool, payload []byte) (bool, []byte, error) {
+				if name == "tcpip-forward" {
+					// Deliver the wrong-hostname URI via the notification
+					// channel shortly after the tcpip-forward is accepted.
+					go func() {
+						time.Sleep(5 * time.Millisecond)
+						if currentManager == nil {
+							return
+						}
+						key := forwardingKey(requestedHost, requestedPort)
+						currentManager.addrNotifMu.Lock()
+						if ch, ok := currentManager.addrNotifications[key]; ok {
+							select {
+							case ch <- []string{"https://random.nue.tuns.sh"}:
+							default:
+							}
+						}
+						currentManager.addrNotifMu.Unlock()
+					}()
+				}
+				return true, nil, nil
+			})
+		return client, nil
+	}
+
+	sshConfig := SSHConnectionConfig{
+		PrivateKey:                 GenerateTestPrivateKey(t),
+		ServerAddress:              "example.com:22",
+		Username:                   "testuser",
+		ConnectTimeout:             5 * time.Second,
+		FwdReqTimeout:              2 * time.Second,
+		KeepAliveInterval:          5 * time.Second,
+		RemoteAddrFunc:             remoteAddrFunc,
+		AddressVerificationTimeout: 500 * time.Millisecond,
+	}
+
+	manager, err := NewSSHTunnelManager(ctx, &sshConfig)
+	if err != nil {
+		t.Fatalf("Failed to create SSH Tunnel Manager: %v", err)
+	}
+	currentManager = manager
+
+	if err := manager.Connect(); err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+
+	err = manager.StartForwarding(ForwardingConfig{
+		RemoteHost:   requestedHost,
+		RemotePort:   requestedPort,
+		InternalHost: "localhost",
+		InternalPort: 8080,
+	})
+	if err == nil {
+		t.Fatal("Expected error from StartForwarding on wrong hostname assignment")
+	}
+
+	callsMu.Lock()
+	defer callsMu.Unlock()
+
+	tcpipSeen := false
+	foundRequestedCancel := false
+	for _, c := range calls {
+		if c.name == "tcpip-forward" && c.addr == requestedHost && c.port == requestedPort {
+			tcpipSeen = true
+			continue
+		}
+		if c.name == "cancel-tcpip-forward" && c.addr == requestedHost &&
+			c.port == requestedPort && tcpipSeen {
+			foundRequestedCancel = true
+		}
+	}
+
+	if !foundRequestedCancel {
+		t.Errorf("expected cancel-tcpip-forward for requested host:port %s:%d after tcpip-forward "+
+			"(wrong-hostname HTTP tunnel must be canceled), calls=%+v", requestedHost, requestedPort, calls)
 	}
 }
 

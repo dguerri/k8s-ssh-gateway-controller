@@ -648,17 +648,13 @@ func (m *SSHTunnelManager) handleAssignedURIs(fwd *ForwardingConfig, key string,
 	if needsVerification && !MatchesRequestedHost(uris, fwd.RemoteHost, fwd.RemotePort, fwd.EnforcePort) {
 		m.log.With("function", "sendForwarding").Warn("wrong hostname assigned",
 			"requested_host", fwd.RemoteHost, "received_uris", uris)
-		// Cancel by the port the server actually bound, not the one we
-		// requested — canceling the requested port leaks the random port
-		// the server allocated.
-		for _, uri := range uris {
-			if !strings.HasPrefix(uri, "tcp://") {
-				continue
-			}
-			if boundPort, ok := tcpURIPort(uri); ok {
-				m.cancelForwarding(fwd.RemoteHost, boundPort, "wrong-hostname-cleanup")
-			}
-		}
+		// Cancel using the originally-requested host:port — the exact values we
+		// sent in the tcpip-forward request. sish (and RFC 4254 §7.1) keys
+		// cancel-tcpip-forward on the original requested bind address+port, so
+		// this releases the listener regardless of which hostname or port the
+		// server actually assigned. Canceling the server-assigned value would
+		// never match and would leak the forwarding (TCP and HTTP/HTTPS alike).
+		m.cancelForwarding(fwd.RemoteHost, fwd.RemotePort, "wrong-hostname-cleanup")
 		return fmt.Errorf("wrong hostname assigned: %v", uris)
 	}
 
