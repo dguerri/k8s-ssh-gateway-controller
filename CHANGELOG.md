@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-07-04
+
 ### Added
 - **TLSRoute support** (`gateway.networking.k8s.io/v1alpha2`) for `protocol: TLS` listeners with `tls.mode: Passthrough`. The backend pod terminates TLS; the controller never holds backend keys.
 - **SNI-proxy SSH session.** New `ssh-gateway.io/sni-proxy: "true"` annotation on `GatewayClass` opens a sish `sni-proxy=true` session.
