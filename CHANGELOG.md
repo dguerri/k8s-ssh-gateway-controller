@@ -15,6 +15,7 @@
 
 ### Removed
 - `SetProxyProtocol` and `GetProxyProtocol` are no longer part of `SSHTunnelManagerInterface`. PROXY-protocol configuration is now a property of an individual session inside the pool; this was always an internal concern and the methods had no external consumers.
+- Standalone manifest `k8s/example-proxy-protocol.yaml`. PROXY protocol no longer needs a dedicated GatewayClass or a separate controller Deployment — it is a session inside the shared pool, enabled per-class via `ssh-gateway.io/proxy-protocol` and opted in per-listener via `ssh-gateway.io/listener-proxy-protocol.<name>`. See `k8s/example-sni.yaml` for the combined example.
 
 ## [2.0.0] - 2025-09-03
 
