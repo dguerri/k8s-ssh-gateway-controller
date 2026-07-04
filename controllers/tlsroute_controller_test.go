@@ -608,6 +608,39 @@ func TestTLSRouteReconcile_GatewayNotReadyRetries(t *testing.T) {
 
 // --- TLSRoute Reconciler branch-coverage tests ---
 
+// TestTLSRouteReconcile_NoParentRef verifies a TLSRoute with no ParentRefs is
+// skipped without error rather than surfacing as a reconcile error.
+func TestTLSRouteReconcile_NoParentRef(t *testing.T) {
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
+
+	s := newRouteTestScheme()
+
+	tlsRoute := &gatewayv1alpha2.TLSRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "orphan-route", Namespace: "default"},
+		Spec:       gatewayv1alpha2.TLSRouteSpec{},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(tlsRoute).Build()
+	gwReconciler, _ := newTLSGatewayReconcilerForTest(true, map[string]*Listener{})
+
+	reconciler := &TLSRouteReconciler{
+		Client:            fakeClient,
+		Scheme:            s,
+		GatewayReconciler: gwReconciler,
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "orphan-route", Namespace: "default"},
+	})
+
+	assert.NoError(t, err, "route without a ParentRef must be skipped, not error")
+	assert.Equal(t, ctrl.Result{}, result)
+
+	var updatedRoute gatewayv1alpha2.TLSRoute
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "orphan-route", Namespace: "default"}, &updatedRoute))
+	assert.Empty(t, updatedRoute.Finalizers)
+}
+
 func TestTLSRouteReconcile_DeletionWithoutFinalizer(t *testing.T) {
 	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
 

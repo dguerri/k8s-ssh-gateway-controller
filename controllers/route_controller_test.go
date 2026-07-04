@@ -300,6 +300,60 @@ func newGatewayReconcilerForTest(connected bool, listeners map[string]*Listener)
 	}
 }
 
+func TestExtractParentGatewayRef(t *testing.T) {
+	explicitNS := gatewayv1.Namespace("gateway-ns")
+
+	tests := []struct {
+		name       string
+		parentRefs []gatewayv1.ParentReference
+		routeNS    string
+		wantNS     string
+		wantName   string
+		wantErr    string
+	}{
+		{
+			name:       "defaults namespace to route namespace",
+			parentRefs: []gatewayv1.ParentReference{{Name: "gw"}},
+			routeNS:    "route-ns",
+			wantNS:     "route-ns",
+			wantName:   "gw",
+		},
+		{
+			name:       "honors explicit parent namespace",
+			parentRefs: []gatewayv1.ParentReference{{Name: "gw", Namespace: &explicitNS}},
+			routeNS:    "route-ns",
+			wantNS:     "gateway-ns",
+			wantName:   "gw",
+		},
+		{
+			name:       "no parent refs",
+			parentRefs: nil,
+			routeNS:    "route-ns",
+			wantErr:    "route has no ParentRef",
+		},
+		{
+			name:       "empty parent name",
+			parentRefs: []gatewayv1.ParentReference{{Name: ""}},
+			routeNS:    "route-ns",
+			wantErr:    "ParentRef name is empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gwNS, gwName, err := extractParentGatewayRef(tt.parentRefs, tt.routeNS)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantNS, gwNS)
+			assert.Equal(t, tt.wantName, gwName)
+		})
+	}
+}
+
 // --- HTTPRoute Reconciler full flow tests ---
 
 func TestHTTPRouteReconcile_RouteNotFound(t *testing.T) {
@@ -934,6 +988,39 @@ func TestTCPRouteReconcile_ForeignRouteNilSectionName(t *testing.T) {
 	var updatedRoute gatewayv1alpha2.TCPRoute
 	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "web-test"}, &updatedRoute))
 	assert.Empty(t, updatedRoute.Finalizers, "no finalizer should be added for a foreign route")
+}
+
+// TestTCPRouteReconcile_NoParentRef verifies a TCPRoute with no ParentRefs is
+// skipped without error rather than surfacing as a reconcile error.
+func TestTCPRouteReconcile_NoParentRef(t *testing.T) {
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
+
+	s := newRouteTestScheme()
+
+	tcpRoute := &gatewayv1alpha2.TCPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "orphan-route", Namespace: "default"},
+		Spec:       gatewayv1alpha2.TCPRouteSpec{},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(tcpRoute).Build()
+	gwReconciler := newGatewayReconcilerForTest(true, map[string]*Listener{})
+
+	reconciler := &TCPRouteReconciler{
+		Client:            fakeClient,
+		Scheme:            s,
+		GatewayReconciler: gwReconciler,
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "orphan-route", Namespace: "default"},
+	})
+
+	assert.NoError(t, err, "route without a ParentRef must be skipped, not error")
+	assert.Equal(t, ctrl.Result{}, result)
+
+	var updatedRoute gatewayv1alpha2.TCPRoute
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "orphan-route", Namespace: "default"}, &updatedRoute))
+	assert.Empty(t, updatedRoute.Finalizers)
 }
 
 func TestTCPRouteReconcile_SuccessfulAdd(t *testing.T) {
