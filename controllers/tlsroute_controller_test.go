@@ -637,17 +637,37 @@ func TestTLSRouteReconcile_DeletionWithoutFinalizer(t *testing.T) {
 	assert.Equal(t, ctrl.Result{}, result, "should return empty result when route is being deleted without our finalizer")
 }
 
+// TestTLSRouteReconcile_ExtractDetailsFails verifies that once a route is known
+// to target a managed Gateway, invalid route details produce a reconcile error.
 func TestTLSRouteReconcile_ExtractDetailsFails(t *testing.T) {
 	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
 
 	s := newRouteTestScheme()
 
-	tlsRoute := &gatewayv1alpha2.TLSRoute{
-		ObjectMeta: metav1.ObjectMeta{Name: "bad-route", Namespace: "default"},
-		Spec:       gatewayv1alpha2.TLSRouteSpec{},
+	gwClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "managed-class"},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: "example.com/gateway-controller"},
+	}
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-gw", Namespace: "default"},
+		Spec:       gatewayv1.GatewaySpec{GatewayClassName: "managed-class"},
 	}
 
-	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(tlsRoute).Build()
+	// Route targets a managed Gateway but is missing Rules, so full extraction fails.
+	sectionName := gatewayv1.SectionName("tls-listener")
+	tlsRoute := &gatewayv1alpha2.TLSRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "bad-route", Namespace: "default"},
+		Spec: gatewayv1alpha2.TLSRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{
+					Name:        "test-gw",
+					SectionName: &sectionName,
+				}},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(gwClass, gw, tlsRoute).Build()
 
 	gwReconciler, _ := newTLSGatewayReconcilerForTest(true, map[string]*Listener{})
 
@@ -662,7 +682,7 @@ func TestTLSRouteReconcile_ExtractDetailsFails(t *testing.T) {
 	})
 
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "must have at least one ParentRef")
+	assert.Contains(t, err.Error(), "must have at least one Rule")
 	assert.Equal(t, ctrl.Result{}, result)
 }
 

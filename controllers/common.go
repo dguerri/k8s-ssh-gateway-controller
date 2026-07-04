@@ -241,6 +241,30 @@ func getSvcHostname(svcName, svcNamespace string) string {
 	return fmt.Sprintf("%s.%s.svc.cluster.local", svcName, svcNamespace)
 }
 
+// extractParentGatewayRef returns the namespace and name of the Gateway targeted
+// by the route's first ParentRef. It performs only the minimal validation needed
+// to identify the parent Gateway (at least one ParentRef with a non-empty Name);
+// sectionName, rules and backends are validated separately by the full extractors.
+//
+// Reconcilers call this first so they can decide whether a route targets a Gateway
+// managed by this controller BEFORE running strict validation. This keeps routes
+// that belong to other controllers — which legitimately omit the optional
+// sectionName — from surfacing as spurious "Reconciler error" log spam.
+func extractParentGatewayRef(parentRefs []gatewayv1.ParentReference, routeNamespace string) (gwNamespace, gwName string, err error) {
+	if len(parentRefs) < 1 {
+		return "", "", fmt.Errorf("route has no ParentRef")
+	}
+	parent := parentRefs[0]
+	if parent.Name == "" {
+		return "", "", fmt.Errorf("ParentRef name is empty")
+	}
+	gwNamespace = routeNamespace
+	if parent.Namespace != nil {
+		gwNamespace = string(*parent.Namespace)
+	}
+	return gwNamespace, string(parent.Name), nil
+}
+
 // extractRouteDetailsFromParts factors the validation shared by
 // extractTCPRouteDetails and extractTLSRouteDetails. kind is the route Kind
 // (e.g. "TCPRoute", "TLSRoute") used in error and log messages. ruleCount is

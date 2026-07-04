@@ -34,13 +34,39 @@ func (r *TLSRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	isManagedByUs := containsString(k8sRoute.Finalizers, getTLSRouteFinalizer())
+
+	// Identify the parent Gateway from the route's first ParentRef so we can
+	// decide whether this route is ours BEFORE running strict validation. Routes
+	// belonging to other controllers legitimately omit the optional sectionName,
+	// so validating them fully here would surface spurious reconcile errors.
+	if !isManagedByUs {
+		gwNamespace, gwName, err := extractParentGatewayRef(k8sRoute.Spec.ParentRefs, k8sRoute.Namespace)
+		if err != nil {
+			slog.With("function", "Reconcile", "tlsRoute", req.NamespacedName).Debug("route has no usable parent Gateway ref, skipping", "error", err)
+			return ctrl.Result{}, nil
+		}
+		isManaged, err := IsGatewayManaged(ctx, r.Client, gwNamespace, gwName)
+		if err != nil {
+			slog.With("function", "Reconcile", "tlsRoute", req.NamespacedName).Error("failed to check if gateway is managed",
+				"gateway", fmt.Sprintf("%s/%s", gwNamespace, gwName),
+				"error", err)
+			return ctrl.Result{}, err
+		}
+		if !isManaged {
+			slog.With("function", "Reconcile", "tlsRoute", req.NamespacedName).Debug("gateway not managed by this controller, skipping",
+				"gateway", fmt.Sprintf("%s/%s", gwNamespace, gwName))
+			return ctrl.Result{}, nil
+		}
+	}
+
+	// The route is ours (already owned, or it targets a Gateway we manage):
+	// validate it fully.
 	routeDetails, err := extractTLSRouteDetails(&k8sRoute)
 	if err != nil {
 		slog.With("function", "Reconcile", "tlsRoute", req.NamespacedName).Error("failed to extract TLSRoute details", "error", err)
 		return ctrl.Result{}, err
 	}
-
-	isManagedByUs := containsString(k8sRoute.Finalizers, getTLSRouteFinalizer())
 
 	if !k8sRoute.DeletionTimestamp.IsZero() {
 		if isManagedByUs {
@@ -49,22 +75,6 @@ func (r *TLSRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		// Not ours, skip
 		slog.With("function", "Reconcile", "tlsRoute", req.NamespacedName).Debug("route being deleted but not managed by us, skipping")
 		return ctrl.Result{}, nil
-	}
-
-	// Not deleting — if we don't yet own it, check if we should adopt
-	if !isManagedByUs {
-		isManaged, err := IsGatewayManaged(ctx, r.Client, routeDetails.gwNamespace, routeDetails.gwName)
-		if err != nil {
-			slog.With("function", "Reconcile", "tlsRoute", req.NamespacedName).Error("failed to check if gateway is managed",
-				"gateway", fmt.Sprintf("%s/%s", routeDetails.gwNamespace, routeDetails.gwName),
-				"error", err)
-			return ctrl.Result{}, err
-		}
-		if !isManaged {
-			slog.With("function", "Reconcile", "tlsRoute", req.NamespacedName).Debug("gateway not managed by this controller, skipping",
-				"gateway", fmt.Sprintf("%s/%s", routeDetails.gwNamespace, routeDetails.gwName))
-			return ctrl.Result{}, nil
-		}
 	}
 
 	return r.handleAddOrUpdate(ctx, req, &k8sRoute, routeDetails)

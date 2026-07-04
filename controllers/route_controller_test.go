@@ -386,6 +386,69 @@ func TestHTTPRouteReconcile_UnmanagedGateway(t *testing.T) {
 	assert.Empty(t, updatedRoute.Finalizers, "no finalizer should be added for unmanaged gateway")
 }
 
+// TestHTTPRouteReconcile_ForeignRouteNilSectionName reproduces the log-spam bug
+// where an HTTPRoute belonging to another controller (nil sectionName, which is
+// valid in the Gateway API) caused a hard "Reconciler error" instead of being
+// skipped. Such routes must be ignored before strict validation runs.
+func TestHTTPRouteReconcile_ForeignRouteNilSectionName(t *testing.T) {
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
+
+	s := newRouteTestScheme()
+
+	// GatewayClass owned by a different controller.
+	gwClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-class"},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: "other.com/controller"},
+	}
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-gw", Namespace: "web-test"},
+		Spec:       gatewayv1.GatewaySpec{GatewayClassName: "other-class"},
+	}
+
+	port := gatewayv1.PortNumber(8080)
+	httpRoute := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "web-test"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{
+					Name: "web-gw",
+					// SectionName intentionally nil (valid in the Gateway API).
+				}},
+			},
+			Rules: []gatewayv1.HTTPRouteRule{{
+				BackendRefs: []gatewayv1.HTTPBackendRef{{
+					BackendRef: gatewayv1.BackendRef{
+						BackendObjectReference: gatewayv1.BackendObjectReference{
+							Name: "backend-svc",
+							Port: &port,
+						},
+					},
+				}},
+			}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(gwClass, gw, httpRoute).Build()
+	gwReconciler := newGatewayReconcilerForTest(true, map[string]*Listener{})
+
+	reconciler := &HTTPRouteReconciler{
+		Client:            fakeClient,
+		Scheme:            s,
+		GatewayReconciler: gwReconciler,
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "web-test"},
+	})
+
+	assert.NoError(t, err, "foreign route with nil sectionName must not produce a reconcile error")
+	assert.Equal(t, ctrl.Result{}, result)
+
+	var updatedRoute gatewayv1.HTTPRoute
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "web-test"}, &updatedRoute))
+	assert.Empty(t, updatedRoute.Finalizers, "no finalizer should be added for a foreign route")
+}
+
 func TestHTTPRouteReconcile_SuccessfulAdd(t *testing.T) {
 	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
 
@@ -812,6 +875,65 @@ func TestTCPRouteReconcile_UnmanagedGateway(t *testing.T) {
 	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-tcp-route", Namespace: "default"}, &updatedRoute)
 	require.NoError(t, err)
 	assert.Empty(t, updatedRoute.Finalizers, "no finalizer should be added for unmanaged gateway")
+}
+
+// TestTCPRouteReconcile_ForeignRouteNilSectionName mirrors the HTTPRoute case:
+// a TCPRoute for another controller with nil sectionName must be skipped, not
+// treated as a reconcile error.
+func TestTCPRouteReconcile_ForeignRouteNilSectionName(t *testing.T) {
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
+
+	s := newRouteTestScheme()
+
+	gwClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-class"},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: "other.com/controller"},
+	}
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-gw", Namespace: "web-test"},
+		Spec:       gatewayv1.GatewaySpec{GatewayClassName: "other-class"},
+	}
+
+	port := gatewayv1.PortNumber(3306)
+	tcpRoute := &gatewayv1alpha2.TCPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "web-test"},
+		Spec: gatewayv1alpha2.TCPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{
+					Name: "web-gw",
+					// SectionName intentionally nil.
+				}},
+			},
+			Rules: []gatewayv1alpha2.TCPRouteRule{{
+				BackendRefs: []gatewayv1.BackendRef{{
+					BackendObjectReference: gatewayv1.BackendObjectReference{
+						Name: "backend-svc",
+						Port: &port,
+					},
+				}},
+			}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(gwClass, gw, tcpRoute).Build()
+	gwReconciler := newGatewayReconcilerForTest(true, map[string]*Listener{})
+
+	reconciler := &TCPRouteReconciler{
+		Client:            fakeClient,
+		Scheme:            s,
+		GatewayReconciler: gwReconciler,
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test", Namespace: "web-test"},
+	})
+
+	assert.NoError(t, err, "foreign route with nil sectionName must not produce a reconcile error")
+	assert.Equal(t, ctrl.Result{}, result)
+
+	var updatedRoute gatewayv1alpha2.TCPRoute
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "test", Namespace: "web-test"}, &updatedRoute))
+	assert.Empty(t, updatedRoute.Finalizers, "no finalizer should be added for a foreign route")
 }
 
 func TestTCPRouteReconcile_SuccessfulAdd(t *testing.T) {
@@ -1623,18 +1745,38 @@ func TestHTTPRouteReconcile_HandleAddOrUpdate_SetRouteGenericError(t *testing.T)
 
 // --- HTTPRoute Reconcile uncovered paths ---
 
+// TestHTTPRouteReconcile_ExtractDetailsFails verifies that once a route is known
+// to target a Gateway this controller manages, invalid route details are reported
+// as a reconcile error (so the user notices their misconfiguration).
 func TestHTTPRouteReconcile_ExtractDetailsFails(t *testing.T) {
 	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
 
 	s := newRouteTestScheme()
 
-	// Create an HTTPRoute with empty spec (no parentRefs, no rules)
-	httpRoute := &gatewayv1.HTTPRoute{
-		ObjectMeta: metav1.ObjectMeta{Name: "bad-route", Namespace: "default"},
-		Spec:       gatewayv1.HTTPRouteSpec{},
+	gwClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "managed-class"},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: "example.com/gateway-controller"},
+	}
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-gw", Namespace: "default"},
+		Spec:       gatewayv1.GatewaySpec{GatewayClassName: "managed-class"},
 	}
 
-	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(httpRoute).Build()
+	// Route targets a managed Gateway but is missing Rules, so full extraction fails.
+	sectionName := gatewayv1.SectionName("http-listener")
+	httpRoute := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "bad-route", Namespace: "default"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{
+					Name:        "test-gw",
+					SectionName: &sectionName,
+				}},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(gwClass, gw, httpRoute).Build()
 
 	gwReconciler := newGatewayReconcilerForTest(true, map[string]*Listener{})
 
@@ -1649,8 +1791,43 @@ func TestHTTPRouteReconcile_ExtractDetailsFails(t *testing.T) {
 	})
 
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "must have at least one ParentRef")
+	assert.Contains(t, err.Error(), "must have at least one Rule")
 	assert.Equal(t, ctrl.Result{}, result)
+}
+
+// TestHTTPRouteReconcile_NoParentRef verifies that a route with no ParentRefs —
+// which cannot target any Gateway — is skipped without error (and without a
+// finalizer), rather than surfacing as a reconcile error.
+func TestHTTPRouteReconcile_NoParentRef(t *testing.T) {
+	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
+
+	s := newRouteTestScheme()
+
+	httpRoute := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "orphan-route", Namespace: "default"},
+		Spec:       gatewayv1.HTTPRouteSpec{},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(httpRoute).Build()
+
+	gwReconciler := newGatewayReconcilerForTest(true, map[string]*Listener{})
+
+	reconciler := &HTTPRouteReconciler{
+		Client:            fakeClient,
+		Scheme:            s,
+		GatewayReconciler: gwReconciler,
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "orphan-route", Namespace: "default"},
+	})
+
+	assert.NoError(t, err, "route without a ParentRef must be skipped, not error")
+	assert.Equal(t, ctrl.Result{}, result)
+
+	var updatedRoute gatewayv1.HTTPRoute
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "orphan-route", Namespace: "default"}, &updatedRoute))
+	assert.Empty(t, updatedRoute.Finalizers)
 }
 
 func TestHTTPRouteReconcile_IsGatewayManagedError(t *testing.T) {
@@ -1998,17 +2175,37 @@ func TestTCPRouteReconcile_HandleAddOrUpdate_SetRouteGenericError(t *testing.T) 
 
 // --- TCPRoute Reconcile uncovered paths ---
 
+// TestTCPRouteReconcile_ExtractDetailsFails verifies that once a route is known
+// to target a managed Gateway, invalid route details produce a reconcile error.
 func TestTCPRouteReconcile_ExtractDetailsFails(t *testing.T) {
 	t.Setenv("GATEWAY_CONTROLLER_NAME", "example.com/gateway-controller")
 
 	s := newRouteTestScheme()
 
-	tcpRoute := &gatewayv1alpha2.TCPRoute{
-		ObjectMeta: metav1.ObjectMeta{Name: "bad-route", Namespace: "default"},
-		Spec:       gatewayv1alpha2.TCPRouteSpec{},
+	gwClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "managed-class"},
+		Spec:       gatewayv1.GatewayClassSpec{ControllerName: "example.com/gateway-controller"},
+	}
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-gw", Namespace: "default"},
+		Spec:       gatewayv1.GatewaySpec{GatewayClassName: "managed-class"},
 	}
 
-	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(tcpRoute).Build()
+	// Route targets a managed Gateway but is missing Rules, so full extraction fails.
+	sectionName := gatewayv1.SectionName("tcp-listener")
+	tcpRoute := &gatewayv1alpha2.TCPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "bad-route", Namespace: "default"},
+		Spec: gatewayv1alpha2.TCPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{
+					Name:        "test-gw",
+					SectionName: &sectionName,
+				}},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(gwClass, gw, tcpRoute).Build()
 
 	gwReconciler := newGatewayReconcilerForTest(true, map[string]*Listener{})
 
@@ -2023,7 +2220,7 @@ func TestTCPRouteReconcile_ExtractDetailsFails(t *testing.T) {
 	})
 
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "must have at least one ParentRef")
+	assert.Contains(t, err.Error(), "must have at least one Rule")
 	assert.Equal(t, ctrl.Result{}, result)
 }
 
