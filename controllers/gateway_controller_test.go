@@ -2770,6 +2770,50 @@ func TestSupportedKindsFor(t *testing.T) {
 	}
 }
 
+// TestAttachedRouteCount verifies the per-listener attached-route count.
+func TestAttachedRouteCount(t *testing.T) {
+	assert.Equal(t, int32(0), attachedRouteCount(&Listener{}))
+	assert.Equal(t, int32(1), attachedRouteCount(&Listener{route: &Route{Name: "r", Namespace: "ns"}}))
+}
+
+// TestPopulateListenerStatuses_AttachedRoutes verifies AttachedRoutes is
+// reported per listener based on whether a route is attached.
+func TestPopulateListenerStatuses_AttachedRoutes(t *testing.T) {
+	mockPool := newMockPool() // plain connected by default
+	reconciler := &GatewayReconciler{
+		pool: mockPool,
+		gateways: map[string]*gateway{
+			"test-ns/test-gw": {
+				listeners: map[string]*Listener{
+					"attached": {Hostname: "example.com", Port: 80, Protocol: "HTTP", SessionKind: sshmgr.SessionPlain, route: &Route{Name: "r", Namespace: "test-ns"}},
+					"empty":    {Hostname: "other.com", Port: 80, Protocol: "HTTP", SessionKind: sshmgr.SessionPlain},
+				},
+			},
+		},
+	}
+
+	k8sGw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-gw", Namespace: "test-ns"},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "my-class",
+			Listeners: []gatewayv1.Listener{
+				{Name: "attached", Port: 80, Protocol: "HTTP"},
+				{Name: "empty", Port: 80, Protocol: "HTTP"},
+			},
+		},
+	}
+	gc := &gatewayv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: "my-class"}}
+
+	reconciler.populateListenerStatuses(k8sGw, gc)
+
+	counts := map[gatewayv1.SectionName]int32{}
+	for _, ls := range k8sGw.Status.Listeners {
+		counts[ls.Name] = ls.AttachedRoutes
+	}
+	assert.Equal(t, int32(1), counts["attached"])
+	assert.Equal(t, int32(0), counts["empty"])
+}
+
 // TestPopulateListenerStatuses_GatewayNotFound verifies the early-return path when
 // the gateway key is absent from r.gateways.
 func TestPopulateListenerStatuses_GatewayNotFound(t *testing.T) {

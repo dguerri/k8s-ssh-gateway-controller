@@ -699,6 +699,15 @@ func (r *GatewayReconciler) listenerProgrammedCondition(l *Listener, sessions Cl
 	}
 }
 
+// attachedRouteCount returns the number of routes attached to a listener. This
+// controller supports at most one route per listener, so the count is 0 or 1.
+func attachedRouteCount(l *Listener) int32 {
+	if l.route != nil {
+		return 1
+	}
+	return 0
+}
+
 // supportedKindsFor returns the RouteGroupKinds supported by a listener based on its protocol.
 func supportedKindsFor(l *Listener) []gatewayv1.RouteGroupKind {
 	grp := gatewayv1.Group("gateway.networking.k8s.io")
@@ -772,6 +781,7 @@ func (r *GatewayReconciler) populateListenerStatuses(k8sGw *gatewayv1.Gateway, g
 			Name:           k8sListener.Name,
 			Conditions:     []metav1.Condition{cond},
 			SupportedKinds: supportedKindsFor(l),
+			AttachedRoutes: attachedRouteCount(l),
 		})
 	}
 	k8sGw.Status.Listeners = listenerStatuses

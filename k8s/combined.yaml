@@ -64,6 +64,15 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gatewayclasses/status"]
     verbs: ["update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes/status"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["tcproutes/status"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["tlsroutes/status"]
+    verbs: ["update", "patch"]
 
 ---
 # Binds the ClusterRole to the ServiceAccount in the ssh-gateway-system namespace

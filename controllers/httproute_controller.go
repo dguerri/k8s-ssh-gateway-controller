@@ -105,12 +105,18 @@ func (r *HTTPRouteReconciler) handleAddOrUpdate(ctx context.Context, req ctrl.Re
 			slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Warn("gateway not ready or not found, will retry with backoff",
 				"gateway", fmt.Sprintf("%s/%s", routeDetails.gwNamespace, routeDetails.gwName),
 				"error", err.Error())
+			writeRouteParentStatus(ctx, r.Client, k8sRoute, &k8sRoute.Status.RouteStatus,
+				k8sRoute.Spec.ParentRefs[0], k8sRoute.Generation,
+				pendingRouteConditions("Parent Gateway is not ready"), "httpRoute")
 			// Return error to trigger controller-runtime's exponential backoff
 			return ctrl.Result{}, err
 		}
 		slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Error("failed to set route", "error", err)
 		return ctrl.Result{}, err
 	}
+	writeRouteParentStatus(ctx, r.Client, k8sRoute, &k8sRoute.Status.RouteStatus,
+		k8sRoute.Spec.ParentRefs[0], k8sRoute.Generation,
+		acceptedRouteConditions(), "httpRoute")
 	slog.With("function", "Reconcile", "httpRoute", req.NamespacedName).Debug("route set successfully")
 	return ctrl.Result{RequeueAfter: routeReconcilePeriod}, nil
 }

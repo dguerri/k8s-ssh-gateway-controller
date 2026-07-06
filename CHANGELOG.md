@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+- **Route status reporting.** HTTPRoute, TCPRoute, and TLSRoute now get their `status.parents` populated for this controller with `Accepted` and `ResolvedRefs` conditions on successful attachment (and `Accepted=False / reason=Pending` while the parent Gateway is not ready). Previously routes carried no status at all. Requires the new `httproutes/status`, `tcproutes/status`, and `tlsroutes/status` RBAC update/patch permissions (added to `k8s/shared.yaml` and `k8s/combined.yaml`).
+
+### Fixed
+- **`AttachedRoutes` count on `GatewayStatus.Listeners`.** Each listener now reports the number of attached routes (0 or 1) instead of always reporting 0.
+
 ## [1.5.0] - 2026-07-04
 
 ### Added

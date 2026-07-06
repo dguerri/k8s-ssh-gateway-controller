@@ -106,12 +106,18 @@ func (r *TCPRouteReconciler) handleAddOrUpdate(ctx context.Context, req ctrl.Req
 			slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Warn("gateway not ready or not found, will retry with backoff",
 				"gateway", fmt.Sprintf("%s/%s", routeDetails.gwNamespace, routeDetails.gwName),
 				"error", err.Error())
+			writeRouteParentStatus(ctx, r.Client, k8sRoute, &k8sRoute.Status.RouteStatus,
+				k8sRoute.Spec.ParentRefs[0], k8sRoute.Generation,
+				pendingRouteConditions("Parent Gateway is not ready"), "tcpRoute")
 			// Return error to trigger controller-runtime's exponential backoff
 			return ctrl.Result{}, err
 		}
 		slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Error("failed to set route", "error", err)
 		return ctrl.Result{}, err
 	}
+	writeRouteParentStatus(ctx, r.Client, k8sRoute, &k8sRoute.Status.RouteStatus,
+		k8sRoute.Spec.ParentRefs[0], k8sRoute.Generation,
+		acceptedRouteConditions(), "tcpRoute")
 	slog.With("function", "Reconcile", "tcpRoute", req.NamespacedName).Debug("route set successfully")
 	return ctrl.Result{RequeueAfter: routeReconcilePeriod}, nil
 }
