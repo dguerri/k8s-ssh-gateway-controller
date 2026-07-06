@@ -12,7 +12,7 @@ import (
 
 	sshmgr "github.com/dguerri/k8s-ssh-gateway-controller/ssh"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
+	gatewayv1alpha3 "sigs.k8s.io/gateway-api/apis/v1alpha3"
 )
 
 // Annotation key for enabling PROXY protocol on the SSH session.
@@ -349,7 +349,7 @@ func extractRouteDetailsFromParts(
 }
 
 // extractTLSRouteDetails extracts common route details from a TLSRoute resource.
-func extractTLSRouteDetails(k8sRoute *gatewayv1alpha2.TLSRoute) (*routeDetails, error) {
+func extractTLSRouteDetails(k8sRoute *gatewayv1alpha3.TLSRoute) (*routeDetails, error) {
 	var backendRefs []gatewayv1.BackendRef
 	if len(k8sRoute.Spec.Rules) > 0 {
 		backendRefs = k8sRoute.Spec.Rules[0].BackendRefs

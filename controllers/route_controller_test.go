@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
+	gatewayv1alpha3 "sigs.k8s.io/gateway-api/apis/v1alpha3"
 )
 
 // errorReturningClient is a mock client that can return specific errors for Get operations
@@ -277,6 +278,7 @@ func newRouteTestScheme() *runtime.Scheme {
 	_ = clientgoscheme.AddToScheme(s)
 	_ = gatewayv1.Install(s)
 	_ = gatewayv1alpha2.Install(s)
+	_ = gatewayv1alpha3.Install(s)
 	return s
 }
 

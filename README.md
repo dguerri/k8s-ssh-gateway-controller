@@ -260,7 +260,7 @@ The controller supports the following Gateway API resources:
 - **Gateway**: Defines listeners (ports and protocols) for incoming traffic
 - **HTTPRoute**: Routes HTTP traffic to backend services
 - **TCPRoute**: Routes TCP traffic to backend services
-- **TLSRoute** (`gateway.networking.k8s.io/v1alpha2`): Routes TLS traffic to backend services using SNI passthrough (the backend terminates TLS)
+- **TLSRoute** (`gateway.networking.k8s.io/v1alpha3`): Routes TLS traffic to backend services using SNI passthrough (the backend terminates TLS)
 
 ## Troubleshooting
 

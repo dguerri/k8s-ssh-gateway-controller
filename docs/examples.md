@@ -277,7 +277,7 @@ Key pieces:
 - Two `TCPRoute`s pick the plain vs PP listener through `parentRefs[].sectionName`; a `TLSRoute` attaches to the TLS Passthrough listener and carries the SNI hostname.
 
 ```yaml
-apiVersion: gateway.networking.k8s.io/v1alpha2
+apiVersion: gateway.networking.k8s.io/v1alpha3
 kind: TLSRoute
 metadata:
   name: tls-example

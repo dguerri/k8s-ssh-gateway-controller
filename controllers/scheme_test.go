@@ -7,6 +7,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
+	gatewayv1alpha3 "sigs.k8s.io/gateway-api/apis/v1alpha3"
 )
 
 func TestSetupScheme(t *testing.T) {
@@ -16,6 +17,7 @@ func TestSetupScheme(t *testing.T) {
 		clientgoscheme.AddToScheme,
 		gatewayv1.Install,
 		gatewayv1alpha2.Install,
+		gatewayv1alpha3.Install,
 	}
 
 	for _, add := range expectedSchemes {
@@ -32,7 +34,7 @@ func TestSetupScheme(t *testing.T) {
 
 func TestSetupScheme_RegistersTLSRoute(t *testing.T) {
 	s := SetupScheme()
-	if !s.Recognizes(gatewayv1alpha2.SchemeGroupVersion.WithKind("TLSRoute")) {
-		t.Fatal("TLSRoute should be registered in the scheme")
+	if !s.Recognizes(gatewayv1alpha3.SchemeGroupVersion.WithKind("TLSRoute")) {
+		t.Fatal("v1alpha3 TLSRoute should be registered in the scheme")
 	}
 }
