@@ -16,8 +16,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
-	gatewayv1alpha3 "sigs.k8s.io/gateway-api/apis/v1alpha3"
 )
 
 func TestExtractTLSRouteDetails(t *testing.T) {
@@ -28,16 +26,16 @@ func TestExtractTLSRouteDetails(t *testing.T) {
 	backendHost := "test-service"
 	backendPort := 8443
 
-	valid := &gatewayv1alpha3.TLSRoute{
+	valid := &gatewayv1.TLSRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: routeName, Namespace: namespace},
-		Spec: gatewayv1alpha3.TLSRouteSpec{
+		Spec: gatewayv1.TLSRouteSpec{
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{
 				ParentRefs: []gatewayv1.ParentReference{{
 					Name:        gatewayv1.ObjectName(gwName),
 					SectionName: (*gatewayv1.SectionName)(&listenerName),
 				}},
 			},
-			Rules: []gatewayv1alpha2.TLSRouteRule{{
+			Rules: []gatewayv1.TLSRouteRule{{
 				BackendRefs: []gatewayv1.BackendRef{{
 					BackendObjectReference: gatewayv1.BackendObjectReference{
 						Name: gatewayv1.ObjectName(backendHost),
@@ -67,9 +65,9 @@ func TestExtractTLSRouteDetails(t *testing.T) {
 }
 
 func TestExtractTLSRouteDetails_NoParentRefs(t *testing.T) {
-	rd, err := extractTLSRouteDetails(&gatewayv1alpha3.TLSRoute{
+	rd, err := extractTLSRouteDetails(&gatewayv1.TLSRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "ns"},
-		Spec:       gatewayv1alpha3.TLSRouteSpec{},
+		Spec:       gatewayv1.TLSRouteSpec{},
 	})
 	if err == nil {
 		t.Fatal("expected error for no parent refs")
@@ -85,9 +83,9 @@ func TestExtractTLSRouteDetails_NoParentRefs(t *testing.T) {
 func TestExtractTLSRouteDetails_NoRules(t *testing.T) {
 	gwName := "gw"
 	listenerName := "tls"
-	rd, err := extractTLSRouteDetails(&gatewayv1alpha3.TLSRoute{
+	rd, err := extractTLSRouteDetails(&gatewayv1.TLSRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "ns"},
-		Spec: gatewayv1alpha3.TLSRouteSpec{
+		Spec: gatewayv1.TLSRouteSpec{
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{
 				ParentRefs: []gatewayv1.ParentReference{{
 					Name:        gatewayv1.ObjectName(gwName),
@@ -108,9 +106,9 @@ func TestExtractTLSRouteDetails_MultipleParentRefs(t *testing.T) {
 	listenerName := "tls"
 	backendHost := "svc"
 	backendPort := 443
-	rd, err := extractTLSRouteDetails(&gatewayv1alpha3.TLSRoute{
+	rd, err := extractTLSRouteDetails(&gatewayv1.TLSRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "ns"},
-		Spec: gatewayv1alpha3.TLSRouteSpec{
+		Spec: gatewayv1.TLSRouteSpec{
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{
 				ParentRefs: []gatewayv1.ParentReference{
 					{
@@ -123,7 +121,7 @@ func TestExtractTLSRouteDetails_MultipleParentRefs(t *testing.T) {
 					},
 				},
 			},
-			Rules: []gatewayv1alpha2.TLSRouteRule{{
+			Rules: []gatewayv1.TLSRouteRule{{
 				BackendRefs: []gatewayv1.BackendRef{{
 					BackendObjectReference: gatewayv1.BackendObjectReference{
 						Name: gatewayv1.ObjectName(backendHost),
@@ -143,9 +141,9 @@ func TestExtractTLSRouteDetails_MultipleParentRefs(t *testing.T) {
 
 func TestExtractTLSRouteDetails_EmptyParentName(t *testing.T) {
 	listenerName := "tls"
-	rd, err := extractTLSRouteDetails(&gatewayv1alpha3.TLSRoute{
+	rd, err := extractTLSRouteDetails(&gatewayv1.TLSRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "ns"},
-		Spec: gatewayv1alpha3.TLSRouteSpec{
+		Spec: gatewayv1.TLSRouteSpec{
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{
 				ParentRefs: []gatewayv1.ParentReference{{
 					Name:        "",
@@ -167,9 +165,9 @@ func TestExtractTLSRouteDetails_ExplicitParentNamespace(t *testing.T) {
 	backendHost := "svc"
 	backendPort := 443
 	gwNS := gatewayv1.Namespace(gwNamespace)
-	rd, err := extractTLSRouteDetails(&gatewayv1alpha3.TLSRoute{
+	rd, err := extractTLSRouteDetails(&gatewayv1.TLSRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "ns"},
-		Spec: gatewayv1alpha3.TLSRouteSpec{
+		Spec: gatewayv1.TLSRouteSpec{
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{
 				ParentRefs: []gatewayv1.ParentReference{{
 					Name:        gatewayv1.ObjectName(gwName),
@@ -177,7 +175,7 @@ func TestExtractTLSRouteDetails_ExplicitParentNamespace(t *testing.T) {
 					SectionName: (*gatewayv1.SectionName)(&listenerName),
 				}},
 			},
-			Rules: []gatewayv1alpha2.TLSRouteRule{{
+			Rules: []gatewayv1.TLSRouteRule{{
 				BackendRefs: []gatewayv1.BackendRef{{
 					BackendObjectReference: gatewayv1.BackendObjectReference{
 						Name: gatewayv1.ObjectName(backendHost),
@@ -197,9 +195,9 @@ func TestExtractTLSRouteDetails_ExplicitParentNamespace(t *testing.T) {
 
 func TestExtractTLSRouteDetails_NilSectionName(t *testing.T) {
 	gwName := "gw"
-	rd, err := extractTLSRouteDetails(&gatewayv1alpha3.TLSRoute{
+	rd, err := extractTLSRouteDetails(&gatewayv1.TLSRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "ns"},
-		Spec: gatewayv1alpha3.TLSRouteSpec{
+		Spec: gatewayv1.TLSRouteSpec{
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{
 				ParentRefs: []gatewayv1.ParentReference{{
 					Name: gatewayv1.ObjectName(gwName),
@@ -216,16 +214,16 @@ func TestExtractTLSRouteDetails_NilSectionName(t *testing.T) {
 func TestExtractTLSRouteDetails_NoBackendRefs(t *testing.T) {
 	gwName := "gw"
 	listenerName := "tls"
-	rd, err := extractTLSRouteDetails(&gatewayv1alpha3.TLSRoute{
+	rd, err := extractTLSRouteDetails(&gatewayv1.TLSRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "ns"},
-		Spec: gatewayv1alpha3.TLSRouteSpec{
+		Spec: gatewayv1.TLSRouteSpec{
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{
 				ParentRefs: []gatewayv1.ParentReference{{
 					Name:        gatewayv1.ObjectName(gwName),
 					SectionName: (*gatewayv1.SectionName)(&listenerName),
 				}},
 			},
-			Rules: []gatewayv1alpha2.TLSRouteRule{{}},
+			Rules: []gatewayv1.TLSRouteRule{{}},
 		},
 	})
 	if err == nil || rd != nil {
@@ -236,16 +234,16 @@ func TestExtractTLSRouteDetails_NoBackendRefs(t *testing.T) {
 func TestExtractTLSRouteDetails_EmptyBackendName(t *testing.T) {
 	gwName := "gw"
 	listenerName := "tls"
-	rd, err := extractTLSRouteDetails(&gatewayv1alpha3.TLSRoute{
+	rd, err := extractTLSRouteDetails(&gatewayv1.TLSRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "ns"},
-		Spec: gatewayv1alpha3.TLSRouteSpec{
+		Spec: gatewayv1.TLSRouteSpec{
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{
 				ParentRefs: []gatewayv1.ParentReference{{
 					Name:        gatewayv1.ObjectName(gwName),
 					SectionName: (*gatewayv1.SectionName)(&listenerName),
 				}},
 			},
-			Rules: []gatewayv1alpha2.TLSRouteRule{{
+			Rules: []gatewayv1.TLSRouteRule{{
 				BackendRefs: []gatewayv1.BackendRef{{
 					BackendObjectReference: gatewayv1.BackendObjectReference{
 						Name: "",
@@ -262,16 +260,16 @@ func TestExtractTLSRouteDetails_EmptyBackendName(t *testing.T) {
 func TestExtractTLSRouteDetails_NilBackendPort(t *testing.T) {
 	gwName := "gw"
 	listenerName := "tls"
-	rd, err := extractTLSRouteDetails(&gatewayv1alpha3.TLSRoute{
+	rd, err := extractTLSRouteDetails(&gatewayv1.TLSRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "ns"},
-		Spec: gatewayv1alpha3.TLSRouteSpec{
+		Spec: gatewayv1.TLSRouteSpec{
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{
 				ParentRefs: []gatewayv1.ParentReference{{
 					Name:        gatewayv1.ObjectName(gwName),
 					SectionName: (*gatewayv1.SectionName)(&listenerName),
 				}},
 			},
-			Rules: []gatewayv1alpha2.TLSRouteRule{{
+			Rules: []gatewayv1.TLSRouteRule{{
 				BackendRefs: []gatewayv1.BackendRef{{
 					BackendObjectReference: gatewayv1.BackendObjectReference{
 						Name: "svc",
@@ -293,16 +291,16 @@ func TestExtractTLSRouteDetails_ExplicitBackendNamespace(t *testing.T) {
 	backendHost := "svc"
 	backendPort := 443
 	backendNS := gatewayv1.Namespace("backend-ns")
-	rd, err := extractTLSRouteDetails(&gatewayv1alpha3.TLSRoute{
+	rd, err := extractTLSRouteDetails(&gatewayv1.TLSRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "ns"},
-		Spec: gatewayv1alpha3.TLSRouteSpec{
+		Spec: gatewayv1.TLSRouteSpec{
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{
 				ParentRefs: []gatewayv1.ParentReference{{
 					Name:        gatewayv1.ObjectName(gwName),
 					SectionName: (*gatewayv1.SectionName)(&listenerName),
 				}},
 			},
-			Rules: []gatewayv1alpha2.TLSRouteRule{{
+			Rules: []gatewayv1.TLSRouteRule{{
 				BackendRefs: []gatewayv1.BackendRef{{
 					BackendObjectReference: gatewayv1.BackendObjectReference{
 						Name:      gatewayv1.ObjectName(backendHost),
@@ -335,23 +333,23 @@ func TestGetTLSRouteFinalizer(t *testing.T) {
 
 // newTLSRouteForTest returns a valid TLSRoute pointing at the named gateway/listener
 // with a single backend service reference.
-func newTLSRouteForTest(name, namespace, gwName, listenerName, backendName string, backendPort int32, finalizers []string) *gatewayv1alpha3.TLSRoute {
+func newTLSRouteForTest(name, namespace, gwName, listenerName, backendName string, backendPort int32, finalizers []string) *gatewayv1.TLSRoute {
 	sn := gatewayv1.SectionName(listenerName)
 	p := gatewayv1.PortNumber(backendPort)
-	return &gatewayv1alpha3.TLSRoute{
+	return &gatewayv1.TLSRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       name,
 			Namespace:  namespace,
 			Finalizers: finalizers,
 		},
-		Spec: gatewayv1alpha3.TLSRouteSpec{
+		Spec: gatewayv1.TLSRouteSpec{
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{
 				ParentRefs: []gatewayv1.ParentReference{{
 					Name:        gatewayv1.ObjectName(gwName),
 					SectionName: &sn,
 				}},
 			},
-			Rules: []gatewayv1alpha2.TLSRouteRule{{
+			Rules: []gatewayv1.TLSRouteRule{{
 				BackendRefs: []gatewayv1.BackendRef{{
 					BackendObjectReference: gatewayv1.BackendObjectReference{
 						Name: gatewayv1.ObjectName(backendName),
@@ -439,7 +437,7 @@ func TestTLSRouteReconcile_UnmanagedGateway(t *testing.T) {
 	assert.Equal(t, ctrl.Result{}, result)
 
 	// Verify no finalizer was added
-	var updatedRoute gatewayv1alpha3.TLSRoute
+	var updatedRoute gatewayv1.TLSRoute
 	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-tls-route", Namespace: "default"}, &updatedRoute)
 	require.NoError(t, err)
 	assert.Empty(t, updatedRoute.Finalizers, "no finalizer should be added for unmanaged gateway")
@@ -485,7 +483,7 @@ func TestTLSRouteReconcile_SuccessfulAdd(t *testing.T) {
 	assert.Equal(t, routeReconcilePeriod, result.RequeueAfter, "should requeue after routeReconcilePeriod")
 
 	// Verify finalizer was added
-	var updatedRoute gatewayv1alpha3.TLSRoute
+	var updatedRoute gatewayv1.TLSRoute
 	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-tls-route", Namespace: "default"}, &updatedRoute)
 	require.NoError(t, err)
 	assert.Contains(t, updatedRoute.Finalizers, getTLSRouteFinalizer(), "finalizer should be added")
@@ -616,9 +614,9 @@ func TestTLSRouteReconcile_NoParentRef(t *testing.T) {
 
 	s := newRouteTestScheme()
 
-	tlsRoute := &gatewayv1alpha3.TLSRoute{
+	tlsRoute := &gatewayv1.TLSRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "orphan-route", Namespace: "default"},
-		Spec:       gatewayv1alpha3.TLSRouteSpec{},
+		Spec:       gatewayv1.TLSRouteSpec{},
 	}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(tlsRoute).Build()
@@ -637,7 +635,7 @@ func TestTLSRouteReconcile_NoParentRef(t *testing.T) {
 	assert.NoError(t, err, "route without a ParentRef must be skipped, not error")
 	assert.Equal(t, ctrl.Result{}, result)
 
-	var updatedRoute gatewayv1alpha3.TLSRoute
+	var updatedRoute gatewayv1.TLSRoute
 	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "orphan-route", Namespace: "default"}, &updatedRoute))
 	assert.Empty(t, updatedRoute.Finalizers)
 }
@@ -689,9 +687,9 @@ func TestTLSRouteReconcile_ExtractDetailsFails(t *testing.T) {
 
 	// Route targets a managed Gateway but is missing Rules, so full extraction fails.
 	sectionName := gatewayv1.SectionName("tls-listener")
-	tlsRoute := &gatewayv1alpha3.TLSRoute{
+	tlsRoute := &gatewayv1.TLSRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "bad-route", Namespace: "default"},
-		Spec: gatewayv1alpha3.TLSRouteSpec{
+		Spec: gatewayv1.TLSRouteSpec{
 			CommonRouteSpec: gatewayv1.CommonRouteSpec{
 				ParentRefs: []gatewayv1.ParentReference{{
 					Name:        "test-gw",

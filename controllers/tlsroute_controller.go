@@ -9,7 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	gatewayv1alpha3 "sigs.k8s.io/gateway-api/apis/v1alpha3"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 type TLSRouteReconciler struct {
@@ -21,14 +21,14 @@ type TLSRouteReconciler struct {
 
 func (r *TLSRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&gatewayv1alpha3.TLSRoute{}).
+		For(&gatewayv1.TLSRoute{}).
 		Complete(r)
 }
 
 func (r *TLSRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	slog.With("function", "Reconcile", "tlsRoute", req.NamespacedName).Debug("starting reconciliation")
 
-	var k8sRoute gatewayv1alpha3.TLSRoute
+	var k8sRoute gatewayv1.TLSRoute
 	if err := r.Get(ctx, req.NamespacedName, &k8sRoute); err != nil {
 		slog.With("function", "Reconcile", "tlsRoute", req.NamespacedName).Debug("unable to retrieve TLSRoute", "error", err)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -80,7 +80,7 @@ func (r *TLSRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	return r.handleAddOrUpdate(ctx, req, &k8sRoute, routeDetails)
 }
 
-func (r *TLSRouteReconciler) handleAddOrUpdate(ctx context.Context, req ctrl.Request, k8sRoute *gatewayv1alpha3.TLSRoute, routeDetails *routeDetails) (ctrl.Result, error) {
+func (r *TLSRouteReconciler) handleAddOrUpdate(ctx context.Context, req ctrl.Request, k8sRoute *gatewayv1.TLSRoute, routeDetails *routeDetails) (ctrl.Result, error) {
 	// Add or Update.
 	slog.With("function", "Reconcile", "tlsRoute", req.NamespacedName).Debug("adding or updating TLSRoute")
 	// Add a finalizer so we can correctly clean up the route when it's deleted
@@ -121,7 +121,7 @@ func (r *TLSRouteReconciler) handleAddOrUpdate(ctx context.Context, req ctrl.Req
 	return ctrl.Result{RequeueAfter: routeReconcilePeriod}, nil
 }
 
-func (r *TLSRouteReconciler) handleDeletion(ctx context.Context, req ctrl.Request, k8sRoute *gatewayv1alpha3.TLSRoute, routeDetails *routeDetails) (ctrl.Result, error) {
+func (r *TLSRouteReconciler) handleDeletion(ctx context.Context, req ctrl.Request, k8sRoute *gatewayv1.TLSRoute, routeDetails *routeDetails) (ctrl.Result, error) {
 	// Handle deletion
 	slog.With("function", "Reconcile", "tlsRoute", req.NamespacedName).Info("processing TLSRoute deletion")
 	if containsString(k8sRoute.Finalizers, getTLSRouteFinalizer()) {

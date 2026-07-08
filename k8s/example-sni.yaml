@@ -90,7 +90,7 @@ spec:
 ---
 # TLSRoute attached to the TLS Passthrough listener: traffic flows through the
 # sni-proxy sish session. The backend terminates TLS; the gateway routes by SNI.
-apiVersion: gateway.networking.k8s.io/v1alpha3
+apiVersion: gateway.networking.k8s.io/v1
 kind: TLSRoute
 metadata:
   name: tls-example
