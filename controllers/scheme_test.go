@@ -32,7 +32,7 @@ func TestSetupScheme(t *testing.T) {
 
 func TestSetupScheme_RegistersTLSRoute(t *testing.T) {
 	s := SetupScheme()
-	if !s.Recognizes(gatewayv1.SchemeGroupVersion.WithKind("TLSRoute")) {
-		t.Fatal("v1 TLSRoute should be registered in the scheme")
+	if _, _, err := s.ObjectKinds(&gatewayv1.TLSRoute{}); err != nil {
+		t.Fatalf("v1 TLSRoute should be registered in the scheme: %v", err)
 	}
 }
