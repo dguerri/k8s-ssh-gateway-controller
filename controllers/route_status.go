@@ -7,8 +7,10 @@ import (
 
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 )
 
 // ptrEqual reports whether two pointers reference equal values (nil == nil).
@@ -101,10 +103,24 @@ func setOurRouteParentStatus(rs *gatewayv1.RouteStatus, parentRef gatewayv1.Pare
 	return true
 }
 
+func getRouteStatus(obj client.Object) *gatewayv1.RouteStatus {
+	switch r := obj.(type) {
+	case *gatewayv1.HTTPRoute:
+		return &r.Status.RouteStatus
+	case *gatewayv1alpha2.TCPRoute:
+		return &r.Status.RouteStatus
+	case *gatewayv1alpha2.TLSRoute:
+		return &r.Status.RouteStatus
+	default:
+		return nil
+	}
+}
+
 // writeRouteParentStatus updates the route's parent status for this controller
 // and persists it, but only when something actually changed. Status update
-// failures are logged and swallowed: the route forwarding is already set up, so
-// a transient status write error should not fail reconciliation.
+// failures are retried on conflict; any remaining error is logged and swallowed:
+// the route forwarding is already set up, so a transient status write error should
+// not fail reconciliation.
 func writeRouteParentStatus[T client.Object](
 	ctx context.Context,
 	c client.Client,
@@ -121,7 +137,23 @@ func writeRouteParentStatus[T client.Object](
 	if !setOurRouteParentStatus(rs, parentRef, generation, conditions) {
 		return
 	}
-	if err := c.Status().Update(ctx, route); err != nil {
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		updateErr := c.Status().Update(ctx, route)
+		if updateErr == nil {
+			return nil
+		}
+		// On conflict, re-fetch the latest route and re-apply our status
+		key := client.ObjectKeyFromObject(route)
+		if getErr := c.Get(ctx, key, route); getErr != nil {
+			return getErr
+		}
+		latestRS := getRouteStatus(route)
+		if latestRS != nil {
+			setOurRouteParentStatus(latestRS, parentRef, route.GetGeneration(), conditions)
+		}
+		return c.Status().Update(ctx, route)
+	})
+	if err != nil {
 		slog.With("function", "writeRouteParentStatus", logKind, route.GetNamespace()+"/"+route.GetName()).
 			Warn("failed to update route status", "error", err)
 	}
