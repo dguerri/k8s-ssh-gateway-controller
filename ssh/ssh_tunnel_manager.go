@@ -119,6 +119,14 @@ type ForwardingConfig struct {
 	EnforcePort bool
 }
 
+// dialErrorStats tracks repeated connection failure statistics for rate-limited logging.
+type dialErrorStats struct {
+	lastLogged time.Time
+	suppressed int
+}
+
+const defaultDialErrorLogCooldown = 10 * time.Second
+
 // SSHTunnelManager manages SSH tunnels and forwardings.
 type SSHTunnelManager struct {
 	externalCtx                context.Context
@@ -141,6 +149,8 @@ type SSHTunnelManager struct {
 	addressVerificationTimeout time.Duration
 	clientMu                   sync.RWMutex
 	addrNotifMu                sync.RWMutex
+	dialErrorsMu               sync.Mutex
+	dialErrors                 map[string]*dialErrorStats
 	captureReady               chan struct{}
 	flags                      SessionFlags
 	log                        *slog.Logger
@@ -196,6 +206,7 @@ func NewSSHTunnelManager(externalCtx context.Context, config *SSHConnectionConfi
 		forwardings:                make(map[string]*ForwardingConfig),
 		assignedAddrs:              make(map[string][]string),
 		addrNotifications:          make(map[string]chan []string),
+		dialErrors:                 make(map[string]*dialErrorStats),
 		sshDialFunc:                sshDialFn,
 		netDialFunc:                netDialFn,
 		flags:                      config.SessionFlags,
@@ -385,6 +396,9 @@ func (m *SSHTunnelManager) StopForwarding(fwd *ForwardingConfig) error {
 	m.addrNotifMu.Lock()
 	delete(m.assignedAddrs, key)
 	m.addrNotifMu.Unlock()
+
+	// Clean up backend dial error stats
+	m.recordBackendDialSuccess(net.JoinHostPort(forwardingSession.InternalHost, strconv.Itoa(forwardingSession.InternalPort)))
 
 	err := m.sendForwarding(forwardingSession, ForwardCancel)
 	if err != nil {
@@ -780,6 +794,52 @@ func (m *SSHTunnelManager) Stop() {
 	m.log.Info("ssh tunnel manager stopped, all forwardings and connections closed")
 }
 
+func (m *SSHTunnelManager) recordBackendDialSuccess(backendAddr string) {
+	m.dialErrorsMu.Lock()
+	delete(m.dialErrors, backendAddr)
+	m.dialErrorsMu.Unlock()
+}
+
+func (m *SSHTunnelManager) logBackendDialError(logger *slog.Logger, backendAddr string, err error) {
+	m.dialErrorsMu.Lock()
+	stats, exists := m.dialErrors[backendAddr]
+	now := time.Now()
+	if !exists {
+		stats = &dialErrorStats{}
+		m.dialErrors[backendAddr] = stats
+	}
+
+	shouldLogWarn := stats.lastLogged.IsZero() || now.Sub(stats.lastLogged) >= defaultDialErrorLogCooldown
+	suppressed := stats.suppressed
+	if shouldLogWarn {
+		stats.lastLogged = now
+		stats.suppressed = 0
+	} else {
+		stats.suppressed++
+	}
+	m.dialErrorsMu.Unlock()
+
+	if shouldLogWarn {
+		if suppressed > 0 {
+			logger.Warn("failed to connect to backend",
+				"internal_address", backendAddr,
+				"error", err,
+				"suppressed_errors", suppressed,
+			)
+		} else {
+			logger.Warn("failed to connect to backend",
+				"internal_address", backendAddr,
+				"error", err,
+			)
+		}
+	} else {
+		logger.Debug("failed to connect to backend",
+			"internal_address", backendAddr,
+			"error", err,
+		)
+	}
+}
+
 // handleChannels manages the lifecycle of a forwarding sessions
 func (m *SSHTunnelManager) handleChannels() {
 	m.clientMu.RLock()
@@ -806,7 +866,6 @@ func (m *SSHTunnelManager) handleChannels() {
 
 			logger := m.log.With(
 				slog.String("channel_type", ch.ChannelType()),
-				slog.String("extra_data", string(ch.ExtraData())),
 			)
 			logger.Debug("received new channel from SSH server")
 
@@ -819,25 +878,32 @@ func (m *SSHTunnelManager) handleChannels() {
 					continue
 				}
 
-				logger.Debug("forwarded-tcpip channel opened", "remote_addr", payload.Addr, "remote_port", payload.Port, "origin_addr", payload.OriginAddr, "origin_port", payload.OriginPort)
-
 				key := forwardingKey(payload.Addr, int(payload.Port))
 				m.clientMu.RLock()
 				fwd, exists := m.forwardings[key]
 				m.clientMu.RUnlock()
 				if exists {
-					go func(ch ssh.NewChannel) {
+					fwdLogger := m.log.With(
+						slog.String("channel_type", channelType),
+						slog.String("remote_host", payload.Addr),
+						slog.Int("remote_port", int(payload.Port)),
+						slog.String("internal_host", fwd.InternalHost),
+						slog.Int("internal_port", fwd.InternalPort),
+					)
+					fwdLogger.Debug("forwarded-tcpip channel opened", "origin_addr", payload.OriginAddr, "origin_port", payload.OriginPort)
+
+					go func(ch ssh.NewChannel, fwd *ForwardingConfig, chanLogger *slog.Logger) {
 						remoteConn, reqs, acceptErr := ch.Accept()
 						if acceptErr != nil {
-							logger.Error("failed to accept channel", "error", acceptErr)
+							chanLogger.Error("failed to accept channel", "error", acceptErr)
 							return
 						}
-						logger.Debug("channel accepted")
+						chanLogger.Debug("channel accepted")
 
 						// Log all requests sent by the SSH server on this channel, and discard them.
 						go func() {
 							for req := range reqs {
-								logger.Debug("received request on channel", "request_type", req.Type, "want_reply", req.WantReply, "payload", string(req.Payload))
+								chanLogger.Debug("received request on channel", "request_type", req.Type, "want_reply", req.WantReply, "payload", string(req.Payload))
 								if req.WantReply {
 									_ = req.Reply(false, nil) // #nosec G104 -- Best effort reply, already in goroutine
 								}
@@ -852,9 +918,11 @@ func (m *SSHTunnelManager) handleChannels() {
 							addr := net.JoinHostPort(fwd.InternalHost, strconv.Itoa(fwd.InternalPort))
 							localConn, localErr := m.netDialFunc("tcp", addr)
 							if localErr != nil {
-								logger.Error("failed to connect to local address", "error", localErr)
+								m.logBackendDialError(chanLogger, addr, localErr)
 								return
 							}
+
+							m.recordBackendDialSuccess(addr)
 
 							defer func() {
 								_ = localConn.Close() // #nosec G104 -- Cleanup in defer, error logged below
@@ -872,7 +940,7 @@ func (m *SSHTunnelManager) handleChannels() {
 							go func() {
 								defer wg.Done()
 								n, err := io.Copy(remoteConn, localConn)
-								m.log.With("function", "handleChannels").Debug("copied data from local to remote", "bytes", n, "error", err)
+								chanLogger.With("function", "handleChannels").Debug("copied data from local to remote", "bytes", n, "error", err)
 								_ = remoteConn.Close() // #nosec G104 -- Best effort close
 								_ = localConn.Close()  // #nosec G104 -- Best effort close
 							}()
@@ -880,16 +948,16 @@ func (m *SSHTunnelManager) handleChannels() {
 							go func() {
 								defer wg.Done()
 								n, err := io.Copy(localConn, remoteConn)
-								m.log.With("function", "handleChannels").Debug("copied data from remote to local", "bytes", n, "error", err)
+								chanLogger.With("function", "handleChannels").Debug("copied data from remote to local", "bytes", n, "error", err)
 								_ = localConn.Close()  // #nosec G104 -- Best effort close
 								_ = remoteConn.Close() // #nosec G104 -- Best effort close
 							}()
 
 							wg.Wait()
-							m.log.With("function", "handleChannels").Debug("channel closed")
+							chanLogger.With("function", "handleChannels").Debug("channel closed")
 						}()
-					}(ch)
-					logger.Debug("forwarding established", "key", key)
+					}(ch, fwd, fwdLogger)
+					fwdLogger.Debug("forwarding established", "key", key)
 				} else {
 					logger.Warn("unable to find forwarding session, canceling orphan forwarding on server",
 						"remote_host", payload.Addr, "remote_port", payload.Port)

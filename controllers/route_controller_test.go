@@ -776,12 +776,8 @@ func TestHTTPRouteReconcile_SetRouteReturnsGatewayNotReady(t *testing.T) {
 		NamespacedName: types.NamespacedName{Name: "test-route", Namespace: "default"},
 	})
 
-	assert.Error(t, err, "should return error when gateway is not ready")
-	assert.Equal(t, ctrl.Result{}, result, "result should be empty when error is returned for backoff")
-
-	// Verify the error is ErrGatewayNotReady
-	var notReadyErr *ErrGatewayNotReady
-	assert.ErrorAs(t, err, &notReadyErr, "error should be ErrGatewayNotReady")
+	assert.NoError(t, err, "should not return error when gateway is not ready (avoids reconciler error logging)")
+	assert.Equal(t, ctrl.Result{RequeueAfter: routeRetryPeriod}, result, "should requeue after routeRetryPeriod")
 }
 
 func TestHTTPRouteReconcile_SetRouteReturnsGatewayNotFound(t *testing.T) {
@@ -840,12 +836,8 @@ func TestHTTPRouteReconcile_SetRouteReturnsGatewayNotFound(t *testing.T) {
 		NamespacedName: types.NamespacedName{Name: "test-route", Namespace: "default"},
 	})
 
-	assert.Error(t, err, "should return error when gateway is not found in internal registry")
-	assert.Equal(t, ctrl.Result{}, result)
-
-	// Verify the error is ErrGatewayNotFound
-	var notFoundErr *ErrGatewayNotFound
-	assert.ErrorAs(t, err, &notFoundErr, "error should be ErrGatewayNotFound")
+	assert.NoError(t, err, "should not return error when gateway is not found (avoids reconciler error logging)")
+	assert.Equal(t, ctrl.Result{RequeueAfter: routeRetryPeriod}, result, "should requeue after routeRetryPeriod")
 }
 
 // --- TCPRoute Reconciler full flow tests ---
@@ -1287,11 +1279,8 @@ func TestTCPRouteReconcile_SetRouteReturnsGatewayNotReady(t *testing.T) {
 		NamespacedName: types.NamespacedName{Name: "test-tcp-route", Namespace: "default"},
 	})
 
-	assert.Error(t, err, "should return error when gateway is not ready")
-	assert.Equal(t, ctrl.Result{}, result)
-
-	var notReadyErr *ErrGatewayNotReady
-	assert.ErrorAs(t, err, &notReadyErr, "error should be ErrGatewayNotReady")
+	assert.NoError(t, err, "should not return error when gateway is not ready (avoids reconciler error logging)")
+	assert.Equal(t, ctrl.Result{RequeueAfter: routeRetryPeriod}, result, "should requeue after routeRetryPeriod")
 }
 
 // --- MockGatewayReconciler validation tests ---

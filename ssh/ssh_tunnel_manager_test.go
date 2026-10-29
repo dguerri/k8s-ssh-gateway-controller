@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -9,9 +10,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1144,12 +1147,11 @@ func TestSendForwardingRequestDenied(t *testing.T) {
 func TestMonitorConnectionWithFailure(t *testing.T) {
 	SetupTest(t)
 
-	keepaliveCallCount := 0
+	var keepaliveCallCount atomic.Int32
 	failingClient := &fakeClient{
 		sendRequestFunc: func(name string, wantReply bool, payload []byte) (bool, []byte, error) {
 			if name == "keepalive@openssh.com" {
-				keepaliveCallCount++
-				if keepaliveCallCount >= 2 {
+				if keepaliveCallCount.Add(1) >= 2 {
 					return false, nil, fmt.Errorf("keepalive failed")
 				}
 			}
@@ -1186,8 +1188,8 @@ func TestMonitorConnectionWithFailure(t *testing.T) {
 	// Wait for multiple keepalive attempts
 	time.Sleep(200 * time.Millisecond)
 
-	if keepaliveCallCount < 2 {
-		t.Errorf("Expected at least 2 keepalive attempts, got %d", keepaliveCallCount)
+	if count := keepaliveCallCount.Load(); count < 2 {
+		t.Errorf("Expected at least 2 keepalive attempts, got %d", count)
 	}
 
 	// Verify connection is closed
@@ -2586,5 +2588,82 @@ func TestNotifyURIWaitersSkipsFullChannels(t *testing.T) {
 	got := <-full
 	if len(got) != 1 || got[0] != "http://placeholder" {
 		t.Errorf("expected channel to still hold the placeholder, got %v", got)
+	}
+}
+
+func TestLogBackendDialError_RateLimitingAndSuppression(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var buf bytes.Buffer
+	testLogger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	manager, err := NewSSHTunnelManager(ctx, &SSHConnectionConfig{
+		PrivateKey:        GenerateTestPrivateKey(t),
+		ServerAddress:     "example.com:22",
+		Username:          "testuser",
+		ConnectTimeout:    5 * time.Second,
+		FwdReqTimeout:     2 * time.Second,
+		KeepAliveInterval: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewSSHTunnelManager: %v", err)
+	}
+
+	backendAddr := "10.0.0.1:80"
+	dialErr := errors.New("connection refused")
+
+	// 1. First error should log at WARN level
+	manager.logBackendDialError(testLogger, backendAddr, dialErr)
+	out := buf.String()
+	if !strings.Contains(out, "level=WARN") {
+		t.Errorf("expected level=WARN in log output, got: %s", out)
+	}
+	if !strings.Contains(out, "failed to connect to backend") {
+		t.Errorf("expected 'failed to connect to backend' in log output, got: %s", out)
+	}
+	if strings.Contains(out, "suppressed_errors") {
+		t.Errorf("first log should not contain suppressed_errors, got: %s", out)
+	}
+
+	// 2. Second error immediately after should log at DEBUG level, not WARN
+	buf.Reset()
+	manager.logBackendDialError(testLogger, backendAddr, dialErr)
+	out = buf.String()
+	if !strings.Contains(out, "level=DEBUG") {
+		t.Errorf("expected level=DEBUG for throttled log, got: %s", out)
+	}
+	if strings.Contains(out, "level=WARN") {
+		t.Errorf("did not expect level=WARN for throttled log, got: %s", out)
+	}
+
+	// Verify internal suppression count
+	manager.dialErrorsMu.Lock()
+	stats := manager.dialErrors[backendAddr]
+	if stats == nil || stats.suppressed != 1 {
+		t.Errorf("expected suppressed count to be 1, got %+v", stats)
+	}
+	// Simulate cooldown elapsed
+	stats.lastLogged = time.Now().Add(-2 * defaultDialErrorLogCooldown)
+	manager.dialErrorsMu.Unlock()
+
+	// 3. Third error after cooldown should log at WARN with suppressed_errors
+	buf.Reset()
+	manager.logBackendDialError(testLogger, backendAddr, dialErr)
+	out = buf.String()
+	if !strings.Contains(out, "level=WARN") {
+		t.Errorf("expected level=WARN after cooldown, got: %s", out)
+	}
+	if !strings.Contains(out, "suppressed_errors=1") {
+		t.Errorf("expected suppressed_errors=1 in log output, got: %s", out)
+	}
+
+	// 4. Record success should clear stats
+	manager.recordBackendDialSuccess(backendAddr)
+	manager.dialErrorsMu.Lock()
+	_, exists := manager.dialErrors[backendAddr]
+	manager.dialErrorsMu.Unlock()
+	if exists {
+		t.Errorf("expected stats for %s to be cleared after success", backendAddr)
 	}
 }

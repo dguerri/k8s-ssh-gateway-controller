@@ -108,8 +108,8 @@ func (r *TLSRouteReconciler) handleAddOrUpdate(ctx context.Context, req ctrl.Req
 			writeRouteParentStatus(ctx, r.Client, k8sRoute, &k8sRoute.Status.RouteStatus,
 				k8sRoute.Spec.ParentRefs[0], k8sRoute.Generation,
 				pendingRouteConditions("Parent Gateway is not ready"), "tlsRoute")
-			// Return error to trigger controller-runtime's exponential backoff
-			return ctrl.Result{}, err
+			// Return nil error with RequeueAfter to avoid controller-runtime error stack traces
+			return ctrl.Result{RequeueAfter: routeRetryPeriod}, nil
 		}
 		slog.With("function", "Reconcile", "tlsRoute", req.NamespacedName).Error("failed to set route", "error", err)
 		return ctrl.Result{}, err

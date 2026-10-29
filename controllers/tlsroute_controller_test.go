@@ -598,11 +598,8 @@ func TestTLSRouteReconcile_GatewayNotReadyRetries(t *testing.T) {
 		NamespacedName: types.NamespacedName{Name: "test-tls-route", Namespace: "default"},
 	})
 
-	assert.Error(t, err, "should return error when SNI session is not ready")
-	assert.Equal(t, ctrl.Result{}, result, "result should be empty when error is returned for backoff")
-
-	var notReadyErr *ErrGatewayNotReady
-	assert.ErrorAs(t, err, &notReadyErr, "error should be ErrGatewayNotReady")
+	assert.NoError(t, err, "should not return error when SNI session is not ready (avoids reconciler error logging)")
+	assert.Equal(t, ctrl.Result{RequeueAfter: routeRetryPeriod}, result, "should requeue after routeRetryPeriod")
 }
 
 // --- TLSRoute Reconciler branch-coverage tests ---

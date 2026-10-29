@@ -63,6 +63,14 @@ The SSH Gateway API Controller can be configured using the following environment
 - **Recommended**: 10-20s for most deployments
 - **Impact**: Lower values provide faster recovery after SSH reconnection but increase reconciliation load
 
+#### `ROUTE_RETRY_PERIOD`
+- **Description**: How quickly route controllers requeue reconciliation when waiting for the parent Gateway to become ready
+- **Default**: `2s`
+- **Example**: `ROUTE_RETRY_PERIOD=3s`
+- **Format**: Go duration string
+- **Recommended**: 1-5s for most deployments
+- **Impact**: Controls wait time before re-checking for parent Gateway without producing controller-runtime error stack traces
+
 ### Controller Identification
 
 #### `GATEWAY_CONTROLLER_NAME`
@@ -487,6 +495,7 @@ level=INFO msg="forwarding already exists, adopting it"
 |----------|---------|-----------------|-----------------|
 | `GATEWAY_RECONCILE_PERIOD` | 30s | 15s | 120s |
 | `ROUTE_RECONCILE_PERIOD` | 10s | 5s | 60s |
+| `ROUTE_RETRY_PERIOD` | 2s | 1s | 10s |
 | `KEEP_ALIVE_INTERVAL` | 10s | 5s | 30s |
 | `CONNECT_TIMEOUT` | 5s | 3s | 30s |
 

@@ -80,6 +80,10 @@ const (
 	// defaultRouteReconcilePeriod is how often HTTPRoute/TCPRoute controllers reconcile
 	// to retry failed route attachments and ensure routes are active
 	defaultRouteReconcilePeriod = 10 * time.Second
+
+	// defaultRouteRetryPeriod is how often HTTPRoute/TCPRoute/TLSRoute controllers reconcile
+	// when waiting for the parent Gateway to become ready
+	defaultRouteRetryPeriod = 2 * time.Second
 )
 
 var keyPath = getEnvOrDefault("SSH_PRIVATE_KEY_PATH", defaultKeyPath)
@@ -92,6 +96,7 @@ var sshHostKey = getEnvOrDefault("SSH_HOST_KEY", "")
 // Reconciliation period configuration
 var gatewayReconcilePeriod = getEnvDurationOrDefault("GATEWAY_RECONCILE_PERIOD", defaultGatewayReconcilePeriod)
 var routeReconcilePeriod = getEnvDurationOrDefault("ROUTE_RECONCILE_PERIOD", defaultRouteReconcilePeriod)
+var routeRetryPeriod = getEnvDurationOrDefault("ROUTE_RETRY_PERIOD", defaultRouteRetryPeriod)
 
 // Dependency injection for testing purposes
 var osReadFile = os.ReadFile
